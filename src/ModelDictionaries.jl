@@ -503,8 +503,8 @@ end
 
 Load a ModelDictionary from an Arrow file.
 
-Reconstructs variable names from the stored base name and indices,
-then matches them to variables in the provided model.
+Iterates over all variables in the model and looks up their values in the data file.
+Variables not found in the file will have `nothing` values.
 
 # Arguments
 - `path`: Path to the Arrow file
@@ -524,14 +524,30 @@ See also: [`save`](@ref), [`ModelDictionary`](@ref)
 """
 function load(path::AbstractString, model::AbstractModel)
 	df = DataFrame(Arrow.Table(path))
-	d = ModelDictionary(model)
+
+	# Build index for O(1) lookup: (variable, indices) => value
+	data_index = Dict{Tuple{String, String}, Float64}()
 	for row in eachrow(df)
-		name = isempty(row.indices) ? row.variable : "$(row.variable)[$(row.indices)]"
-		var = variable_by_name(model, name)
-		isnothing(var) && continue
-		d[var] = row.value
+		data_index[(row.variable, row.indices)] = row.value
+	end
+
+	d = ModelDictionary(model)
+	for var in all_variables(model)
+		key = _var_to_arrow_key(var)
+		if haskey(data_index, key)
+			d[var] = data_index[key]
+		end
 	end
 	return d
+end
+
+"""
+Convert a JuMP variable to the (variable, indices) key format used in Arrow files.
+E.g., x → ("x", ""), y[1,2] → ("y", "1,2")
+"""
+function _var_to_arrow_key(var::AbstractVariableRef)
+	base, indices = parse_variable_name(name(var))
+	return (base, indices)
 end
 
 # ----------------------------------------------------------------------------------------------------------------------

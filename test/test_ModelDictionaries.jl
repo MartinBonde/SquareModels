@@ -4,6 +4,8 @@ using Test
 using JuMP
 using SquareModels
 using Dictionaries
+using Arrow
+using DataFrames
 
 model = Model()
 vars = @variables model begin
@@ -408,6 +410,59 @@ end
 		@test isnothing(d2[y[1]])
 		@test isnothing(d2[y[2]])
 		@test isnothing(d2[y[3]])
+	end
+end
+
+@testset "Test load with indices outside model range" begin
+	# Create a model with limited index range
+	model = Model()
+	@variable(model, a[2025:2030])
+	@variable(model, b[1:2, 2025:2030])
+
+	# Create Arrow data with indices outside the model's range
+	data = DataFrame(
+		variable = ["a", "a", "a", "b", "b", "b"],
+		indices = ["2024", "2025", "2100", "1,2025", "1,2024", "3,2025"],
+		value = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+	)
+
+	mktempdir() do tmpdir
+		path = joinpath(tmpdir, "test.arrow")
+		Arrow.write(path, data)
+
+		# Load should skip indices that don't exist in model
+		d = load(path, model)
+
+		# Only a[2025] and b[1,2025] should be loaded
+		@test d[a[2025]] == 2.0
+		@test d[b[1, 2025]] == 4.0
+
+		# Other valid model indices should be nothing (not in data or outside data range)
+		@test isnothing(d[a[2026]])
+		@test isnothing(d[b[2, 2025]])
+	end
+end
+
+@testset "Test load with partial data" begin
+	model = Model()
+	@variable(model, x)
+	@variable(model, y[1:2])
+
+	mktempdir() do tmpdir
+		# Data only has x, not y
+		data = DataFrame(
+			variable = ["x"],
+			indices = [""],
+			value = [1.0]
+		)
+		path = joinpath(tmpdir, "partial.arrow")
+		Arrow.write(path, data)
+
+		# Missing variables are nothing
+		d = load(path, model)
+		@test d[x] == 1.0
+		@test isnothing(d[y[1]])
+		@test isnothing(d[y[2]])
 	end
 end
 
