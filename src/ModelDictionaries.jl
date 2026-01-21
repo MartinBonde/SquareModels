@@ -47,11 +47,35 @@ end
 	Base.isassigned,
 	Base.length,
 	Base.iterate,
-	Base.display,
 	Base.filter,
 	Base.haskey,
 	Base.get,
 )
+
+function Base.show(io::IO, ::MIME"text/plain", md::ModelDictionary)
+	n = length(md)
+	print(io, "ModelDictionary with ", n, " entries")
+	n == 0 && return
+	println(io, ":")
+	# Show first few and last few entries, similar to Vector display
+	max_show = get(io, :limit, false) ? 10 : n
+	half = max_show ÷ 2
+	ks = collect(keys(md.dictionary))
+	vs = collect(values(md.dictionary))
+	key_width = maximum(length ∘ string, ks; init=1)
+	for i in eachindex(ks)
+		if n > max_show && i == half + 1
+			println(io, "  ⋮")
+			continue
+		elseif n > max_show && half < i < n - half + 1
+			continue
+		end
+		print(io, "  ", lpad(ks[i], key_width), " => ", vs[i])
+		i < n && println(io)
+	end
+end
+
+Base.show(io::IO, md::ModelDictionary) = show(io, MIME"text/plain"(), md)
 
 """
     ModelDictionary(model::AbstractModel)
@@ -142,6 +166,15 @@ function Base.getindex(d::ModelDictionary, container::AbstractArray{Symbol})
 	return create_window(data_view, container)
 end
 Base.getindex(d::ModelDictionary, container::AbstractArray) = getindex(d, Symbol.(container))
+
+# Filtering with a boolean ModelDictionary (e.g., d[d .> 0])
+function Base.getindex(d::ModelDictionary, mask::ModelDictionary)
+	ks = collect(keys(d.dictionary))
+	vs = collect(values(d.dictionary))
+	mask_vs = collect(values(mask.dictionary))
+	selected = mask_vs .== true
+	ModelDictionary(d.model, Dictionary(ks[selected], vs[selected]))
+end
 
 
 """
@@ -292,7 +325,20 @@ function JuMP.fix(model::AbstractModel, d::ModelDictionary)
 	variables = filter(v -> !isnothing(d[v]), all_variables(model))
 	fix(variables, d)
 end
-JuMP.fix(d::ModelDictionary) = JuMP.fix(d.model, d)
+function JuMP.fix(d::ModelDictionary)
+	vars = all_variables(d.model)
+	if length(d) == length(vars)
+		# Fast path: full dictionary, iterate over model variables directly
+		for (var, v) in zip(vars, d.dictionary.values)
+			isnothing(v) || fix(var, v, force=true)
+		end
+	else
+		# Slow path: subset dictionary, must look up by name
+		for (k, v) in pairs(d.dictionary)
+			isnothing(v) || fix(variable_by_name(d.model, string(k)), v, force=true)
+		end
+	end
+end
 
 """
     set_start_value(var::VariableRef, d::ModelDictionary)
@@ -346,7 +392,20 @@ set_start_value(d)  # Set start values for all variables
 See also: [`ModelDictionary`](@ref), [`fix`](@ref), [`value_dict`](@ref)
 """
 JuMP.set_start_value(model::AbstractModel, d::ModelDictionary) = set_start_value.(all_variables(model), Ref(d))
-JuMP.set_start_value(d::ModelDictionary) = JuMP.set_start_value(d.model, d)
+function JuMP.set_start_value(d::ModelDictionary)
+	vars = all_variables(d.model)
+	if length(d) == length(vars)
+		# Fast path: full dictionary
+		for (var, v) in zip(vars, d.dictionary.values)
+			isnothing(v) || set_start_value(var, v)
+		end
+	else
+		# Slow path: subset dictionary
+		for (k, v) in pairs(d.dictionary)
+			isnothing(v) || set_start_value(variable_by_name(d.model, string(k)), v)
+		end
+	end
+end
 
 """
     value_dict(model::AbstractModel) → ModelDictionary
@@ -389,3 +448,40 @@ value_dict(model::AbstractModel) = ModelDictionary(model, value.(all_variables(m
 # ----------------------------------------------------------------------------------------------------------------------
 Base.setproperty!(d::ModelDictionary, name::Symbol, value) = setindex!(d, value, name)
 Base.getproperty(d::ModelDictionary, sym::Symbol) = sym in fieldnames(typeof(d)) ? getfield(d, sym) : d[sym]
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Broadcasting
+# ----------------------------------------------------------------------------------------------------------------------
+struct ModelDictionaryStyle <: Broadcast.BroadcastStyle end
+Base.BroadcastStyle(::Type{<:ModelDictionary}) = ModelDictionaryStyle()
+Base.BroadcastStyle(::ModelDictionaryStyle, ::Broadcast.DefaultArrayStyle{0}) = ModelDictionaryStyle()
+Base.BroadcastStyle(s::ModelDictionaryStyle, ::ModelDictionaryStyle) = s
+
+# ModelDictionary participates directly in broadcasting (not converted via collect)
+Base.broadcastable(md::ModelDictionary) = md
+Base.axes(md::ModelDictionary) = (Base.OneTo(length(md)),)
+Base.getindex(md::ModelDictionary, i::Int) = md.dictionary.values[i]
+
+# Find the first ModelDictionary in broadcast arguments (including nested Broadcasted)
+_find_model_dict(md::ModelDictionary) = md
+_find_model_dict(bc::Broadcast.Broadcasted) = _find_model_dict(bc.args)
+_find_model_dict(::Any) = nothing
+function _find_model_dict(args::Tuple)
+	for arg in args
+		result = _find_model_dict(arg)
+		isnothing(result) || return result
+	end
+	nothing
+end
+
+_bc_collect(md::ModelDictionary) = collect(md.dictionary.values)
+_bc_collect(x) = x
+
+function Base.copy(bc::Broadcast.Broadcasted{ModelDictionaryStyle})
+	md = _find_model_dict(bc.args)
+	flat = Broadcast.flatten(bc)
+	# Unwrap ModelDictionaries to their values, broadcast scalars normally
+	unwrapped = map(_bc_collect, flat.args)
+	new_values = broadcast(flat.f, unwrapped...)
+	ModelDictionary(md.model, Dictionary(keys(md.dictionary), new_values))
+end

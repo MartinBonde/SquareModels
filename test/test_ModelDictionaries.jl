@@ -238,4 +238,102 @@ end
 	@test q ∈ b
 end
 
+@testset "Test broadcasting" begin
+	model = Model()
+	@variable(model, x)
+	@variable(model, y[1:3])
+
+	b = ModelDictionary(model)
+	b[x] = 1.0
+	b[y] = [2.0, 3.0, 4.0]
+
+	# Scalar operations
+	b2 = b .+ 1
+	@test b2 isa ModelDictionary
+	@test b2[x] == 2.0
+	@test all(b2[y] .== [3.0, 4.0, 5.0])
+
+	b3 = 2 .* b
+	@test b3 isa ModelDictionary
+	@test b3[x] == 2.0
+	@test all(b3[y] .== [4.0, 6.0, 8.0])
+
+	# Standard library functions
+	b4 = log.(b)
+	@test b4 isa ModelDictionary
+	@test b4[x] ≈ log(1.0)
+	@test all(b4[y] .≈ log.([2.0, 3.0, 4.0]))
+
+	# User-defined functions
+	myfunc = x -> x^2 + 1
+	b5 = myfunc.(b)
+	@test b5 isa ModelDictionary
+	@test b5[x] == 2.0
+	@test all(b5[y] .== [5.0, 10.0, 17.0])
+
+	# Two dictionaries
+	b6 = ModelDictionary(model)
+	b6[x] = 10.0
+	b6[y] = [20.0, 30.0, 40.0]
+
+	diff = b6 .- b
+	@test diff isa ModelDictionary
+	@test diff[x] == 9.0
+	@test all(diff[y] .== [18.0, 27.0, 36.0])
+
+	# Chained operations
+	b7 = (b .+ 1) .* 2
+	@test b7 isa ModelDictionary
+	@test b7[x] == 4.0
+
+	# Boolean broadcasting and filtering
+	b8 = b .> 2
+	@test b8 isa ModelDictionary
+	@test b8[x] == false
+	@test all(b8[y] .== [false, true, true])
+
+	filtered = b[b .> 2]
+	@test filtered isa ModelDictionary
+	@test length(filtered) == 2
+end
+
+@testset "Test subset ModelDictionary" begin
+	model = Model()
+	@variable(model, x)
+	@variable(model, y[1:3])
+
+	b = ModelDictionary(model)
+	b[x] = 1.0
+	b[y] = [2.0, 3.0, 4.0]
+
+	# Create a subset via filtering
+	subset = b[b .> 2]
+	@test length(subset) == 2
+
+	# fix(subset) should only fix the variables in the subset
+	fix(subset)
+	@test !is_fixed(x)
+	@test !is_fixed(y[1])
+	@test is_fixed(y[2])
+	@test is_fixed(y[3])
+	@test fix_value(y[2]) == 3.0
+	@test fix_value(y[3]) == 4.0
+
+	# Subset should not have been expanded
+	@test length(subset) == 2
+
+	# Unfix for next test
+	unfix.(y[2:3])
+
+	# set_start_value(subset) should only set start values for subset variables
+	set_start_value(subset)
+	@test isnothing(start_value(x))
+	@test isnothing(start_value(y[1]))
+	@test start_value(y[2]) == 3.0
+	@test start_value(y[3]) == 4.0
+
+	# Subset should still not have been expanded
+	@test length(subset) == 2
+end
+
 end # module

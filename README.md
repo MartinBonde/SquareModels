@@ -11,34 +11,35 @@ Large-scale macroeconomic models are typically "square" — each equation determ
 
 ## Quick Example
 
+> 📄 Full runnable version: [`examples/quick_example.jl`](examples/quick_example.jl)
+
 ```julia
-using JuMP
-using SquareModels
-using Ipopt
+using JuMP, Ipopt, SquareModels
 
 model = Model(Ipopt.Optimizer)
 
-j = 1:2  # Two types of labor
+j = 1:2  # Types of labor
 
 @variables model begin
-  L[j]   # Labor demand
-  w[j]   # Wage
-  Y      # Output
-  C      # Consumption
-  p      # Price
-  N[j]   # Labor supply (exogenous)
-  ρ[j]   # Productivity (exogenous)
-  μ[j]   # Scale parameter (calibrated)
-  σ      # Elasticity of substitution (exogenous)
+    L[j]  # Labor demand
+    w[j]  # Wage
+    Y     # Output
+    C     # Consumption
+    p     # Price
+
+    N[j]  # Labor force (exogenous)
+    ρ[j]  # Productivity (exogenous)
+    μ[j]  # Scale parameter (calibrated)
+    σ     # Substitution elasticity (exogenous)
 end
 
 # Define a Block: each line pairs an endogenous variable with its equation
 model_block = @block model begin
-  L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y
-  w[j ∈ j], L[j] == ρ[j] * N[j]
-  Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)
-  C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p
-  p,        p == 1
+    L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y   # Labor demand
+    w[j ∈ j], L[j] == ρ[j] * N[j]                 # Labor market clearing
+    Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)   # Zero profit
+    C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p  # Budget constraint
+    p,        p == 1                               # Numeraire
 end
 
 # Calibration: fix data, solve for unknowns
@@ -46,7 +47,6 @@ fix(σ, 2)
 fix(Y, 1000)
 fix.(N, [3200, 500])
 fix.(L, [800, 200])
-
 set_start_value.(model_block, 1.0)
 optimize!(model)
 baseline = value_dict(model)
@@ -55,7 +55,10 @@ baseline = value_dict(model)
 fix(baseline)
 unfix(model_block)
 fix.(N, [2700, 1000])  # Population shock
+set_start_value(baseline)
 optimize!(model)
+println("Multipliers: ", (value_dict(model) .- baseline) ./ baseline .- 1)
+
 ```
 
 ## Key Concepts
@@ -113,8 +116,7 @@ SquareModels/
 │   ├── endo_exo.jl       # Endo-exo swap implementation
 │   └── utils.jl          # Helper functions
 ├── examples/
-│   ├── CGE_example.jl    # Simple CGE model
-│   ├── JuMP_model.jl     # Multi-period model example
+│   └── quick_example.jl  # Labor market model (tested)
 ├── ModelDictionaries/    # Helper package for variable-value mappings
 ├── GamsGDX/              # Utility for reading GAMS GDX files (optional)
 └── test/
