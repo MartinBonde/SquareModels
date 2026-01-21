@@ -2,7 +2,7 @@
 # Integrated into SquareModels
 
 using Dictionaries
-using Arrow
+using Parquet2
 using DataFrames
 
 """
@@ -446,7 +446,7 @@ See also: [`ModelDictionary`](@ref), [`fix`](@ref), [`set_start_value`](@ref)
 value_dict(model::AbstractModel) = ModelDictionary(model, value.(all_variables(model)))
 
 # ----------------------------------------------------------------------------------------------------------------------
-# Arrow/Parquet serialization
+# Parquet serialization
 # ----------------------------------------------------------------------------------------------------------------------
 """
     parse_variable_name(name::String) → (base_name, indices)
@@ -469,7 +469,7 @@ end
 """
     save(path::AbstractString, d::ModelDictionary)
 
-Save a ModelDictionary to an Arrow file.
+Save a ModelDictionary to a Parquet file.
 
 The dictionary is stored as a table with columns:
 - `variable`: The base variable name (e.g., "K", "cᵃ")
@@ -477,13 +477,13 @@ The dictionary is stored as a table with columns:
 - `value`: The numeric value
 
 # Arguments
-- `path`: File path (typically ending in .arrow or .parquet)
+- `path`: File path (typically ending in .parquet)
 - `d`: The ModelDictionary to save
 
 # Examples
 ```julia
 d = value_dict(model)
-save("solution.arrow", d)
+save("solution.parquet", d)
 ```
 
 See also: [`load`](@ref), [`ModelDictionary`](@ref)
@@ -495,19 +495,22 @@ function save(path::AbstractString, d::ModelDictionary)
 		base, indices = parse_variable_name(string(k))
 		push!(rows, (; variable=base, indices=indices, value=Float64(v)))
 	end
-	Arrow.write(path, DataFrame(rows))
+	Parquet2.writefile(path, DataFrame(rows))
 end
 
 """
     load(path::AbstractString, model::AbstractModel) → ModelDictionary
 
-Load a ModelDictionary from an Arrow file.
+Load a ModelDictionary from a Parquet file.
 
 Iterates over all variables in the model and looks up their values in the data file.
 Variables not found in the file will have `nothing` values.
 
+Supports both the simple format (variable, indices, value) and Gekko's format
+(with id, name, dim1, dim2, period, value columns).
+
 # Arguments
-- `path`: Path to the Arrow file
+- `path`: Path to the Parquet file
 - `model`: The JuMP model to associate with the dictionary
 
 # Returns
@@ -516,24 +519,35 @@ Variables in the model that aren't in the file will have `nothing` values.
 
 # Examples
 ```julia
-d = load("solution.arrow", model)
+d = load("solution.parquet", model)
 set_start_value(d)  # Use loaded values as starting point
 ```
 
 See also: [`save`](@ref), [`ModelDictionary`](@ref)
 """
 function load(path::AbstractString, model::AbstractModel)
-	df = DataFrame(Arrow.Table(path))
+	df = DataFrame(Parquet2.Dataset(path))
+
+	# Detect format and convert to standard format if needed
+	if "variable" in names(df) && "indices" in names(df)
+		# Simple format - use directly
+		data_df = df[.!ismissing.(df.value), [:variable, :indices, :value]]
+	elseif "name" in names(df) && "id" in names(df)
+		# Gekko format - convert
+		data_df = _convert_gekko_format(df)
+	else
+		error("Unknown parquet format. Expected columns: (variable, indices, value) or Gekko format (id, name, dim1, dim2, period, value)")
+	end
 
 	# Build index for O(1) lookup: (variable, indices) => value
 	data_index = Dict{Tuple{String, String}, Float64}()
-	for row in eachrow(df)
+	for row in eachrow(data_df)
 		data_index[(row.variable, row.indices)] = row.value
 	end
 
 	d = ModelDictionary(model)
 	for var in all_variables(model)
-		key = _var_to_arrow_key(var)
+		key = _var_to_key(var)
 		if haskey(data_index, key)
 			d[var] = data_index[key]
 		end
@@ -541,11 +555,39 @@ function load(path::AbstractString, model::AbstractModel)
 	return d
 end
 
+"""Convert Gekko parquet format to simple (variable, indices, value) format."""
+function _convert_gekko_format(df::DataFrame)
+	# Separate metadata rows (have name) from data rows (have value but no name)
+	metadata = df[.!ismissing.(df.name), [:id, :name, :dim1, :dim2]]
+	data = df[ismissing.(df.name) .& .!isnan.(coalesce.(df.value, NaN)), [:id, :period, :value]]
+
+	# Join metadata to data
+	joined = leftjoin(data, metadata, on=:id)
+
+	# Build indices string from dim1, dim2, period
+	function build_indices(row)
+		parts = String[]
+		!ismissing(row.dim1) && push!(parts, string(row.dim1))
+		!ismissing(row.dim2) && push!(parts, string(row.dim2))
+		!ismissing(row.period) && push!(parts, string(row.period))
+		return join(parts, ",")
+	end
+
+	result = DataFrame(
+		variable = coalesce.(joined.name, ""),
+		indices = build_indices.(eachrow(joined)),
+		value = Float64.(joined.value)
+	)
+
+	# Filter out rows with empty variable names
+	return result[result.variable .!= "", :]
+end
+
 """
-Convert a JuMP variable to the (variable, indices) key format used in Arrow files.
+Convert a JuMP variable to the (variable, indices) key format.
 E.g., x → ("x", ""), y[1,2] → ("y", "1,2")
 """
-function _var_to_arrow_key(var::AbstractVariableRef)
+function _var_to_key(var::AbstractVariableRef)
 	base, indices = parse_variable_name(name(var))
 	return (base, indices)
 end

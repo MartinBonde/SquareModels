@@ -4,7 +4,7 @@ using Test
 using JuMP
 using SquareModels
 using Dictionaries
-using Arrow
+using Parquet2
 using DataFrames
 
 model = Model()
@@ -353,7 +353,7 @@ end
 		d[σ] = 0.5
 
 		# Save and load
-		path = joinpath(tmpdir, "test.arrow")
+		path = joinpath(tmpdir, "test.parquet")
 		save(path, d)
 		@test isfile(path)
 
@@ -402,7 +402,7 @@ end
 		d[x] = 1.0
 		# y values are left as nothing
 
-		path = joinpath(tmpdir, "test.arrow")
+		path = joinpath(tmpdir, "test.parquet")
 		save(path, d)
 
 		d2 = load(path, model)
@@ -419,7 +419,7 @@ end
 	@variable(model, a[2025:2030])
 	@variable(model, b[1:2, 2025:2030])
 
-	# Create Arrow data with indices outside the model's range
+	# Create Parquet data with indices outside the model's range
 	data = DataFrame(
 		variable = ["a", "a", "a", "b", "b", "b"],
 		indices = ["2024", "2025", "2100", "1,2025", "1,2024", "3,2025"],
@@ -427,8 +427,8 @@ end
 	)
 
 	mktempdir() do tmpdir
-		path = joinpath(tmpdir, "test.arrow")
-		Arrow.write(path, data)
+		path = joinpath(tmpdir, "test.parquet")
+		Parquet2.writefile(path, data)
 
 		# Load should skip indices that don't exist in model
 		d = load(path, model)
@@ -455,8 +455,8 @@ end
 			indices = [""],
 			value = [1.0]
 		)
-		path = joinpath(tmpdir, "partial.arrow")
-		Arrow.write(path, data)
+		path = joinpath(tmpdir, "partial.parquet")
+		Parquet2.writefile(path, data)
 
 		# Missing variables are nothing
 		d = load(path, model)
