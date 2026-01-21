@@ -336,4 +336,79 @@ end
 	@test length(subset) == 2
 end
 
+@testset "Test save and load" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, x)
+		@variable(model, y[1:3])
+		@variable(model, z[1:2, [:a, :b]])
+		@variable(model, σ)  # Unicode variable name
+
+		d = ModelDictionary(model)
+		d[x] = 1.5
+		d[y] = [2.0, 3.0, 4.0]
+		d[z] = [10.0 20.0; 30.0 40.0]
+		d[σ] = 0.5
+
+		# Save and load
+		path = joinpath(tmpdir, "test.arrow")
+		save(path, d)
+		@test isfile(path)
+
+		d2 = load(path, model)
+		@test d2 isa ModelDictionary
+		@test d2[x] == 1.5
+		@test all(d2[y] .== [2.0, 3.0, 4.0])
+		@test d2[z[1, :a]] == 10.0
+		@test d2[z[2, :b]] == 40.0
+		@test d2[σ] == 0.5
+
+		# Variables not in the file should be nothing
+		@variable(model, new_var)
+		d3 = load(path, model)
+		@test isnothing(d3[new_var])
+	end
+end
+
+@testset "Test parse_variable_name" begin
+	using SquareModels: parse_variable_name
+
+	# Scalar variable
+	@test parse_variable_name("x") == ("x", "")
+	@test parse_variable_name("σ") == ("σ", "")
+
+	# Single index
+	@test parse_variable_name("y[1]") == ("y", "1")
+	@test parse_variable_name("K[2025]") == ("K", "2025")
+
+	# Multiple indices
+	@test parse_variable_name("z[1,a]") == ("z", "1,a")
+	@test parse_variable_name("cᵃ[15,2025]") == ("cᵃ", "15,2025")
+
+	# Complex indices
+	@test parse_variable_name("N[tot,2025]") == ("N", "tot,2025")
+	@test parse_variable_name("emissions[energy,dk,2025,coal]") == ("emissions", "energy,dk,2025,coal")
+end
+
+@testset "Test save skips nothing values" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, x)
+		@variable(model, y[1:3])
+
+		d = ModelDictionary(model)
+		d[x] = 1.0
+		# y values are left as nothing
+
+		path = joinpath(tmpdir, "test.arrow")
+		save(path, d)
+
+		d2 = load(path, model)
+		@test d2[x] == 1.0
+		@test isnothing(d2[y[1]])
+		@test isnothing(d2[y[2]])
+		@test isnothing(d2[y[3]])
+	end
+end
+
 end # module

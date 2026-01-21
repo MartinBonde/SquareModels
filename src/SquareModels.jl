@@ -14,6 +14,7 @@ module SquareModels
 export @block, Block, @endo_exo!, delete!
 export constraints, variables, overlaps, shared_variables
 export ModelDictionary, fix, unfix, set_start_value, value, value_dict
+export save, load
 
 # Constraints are named after the associated endogenous variable
 # A prefix is added as a constraint and variable cannot share the same name

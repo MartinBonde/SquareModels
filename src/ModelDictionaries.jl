@@ -2,6 +2,8 @@
 # Integrated into SquareModels
 
 using Dictionaries
+using Arrow
+using DataFrames
 
 """
     ModelDictionary
@@ -442,6 +444,95 @@ set_start_value(d)
 See also: [`ModelDictionary`](@ref), [`fix`](@ref), [`set_start_value`](@ref)
 """
 value_dict(model::AbstractModel) = ModelDictionary(model, value.(all_variables(model)))
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Arrow/Parquet serialization
+# ----------------------------------------------------------------------------------------------------------------------
+"""
+    parse_variable_name(name::String) → (base_name, indices)
+
+Parse a JuMP variable name into its base name and index string.
+
+# Examples
+```julia
+parse_variable_name("K[2025]")       # ("K", "2025")
+parse_variable_name("cᵃ[15,2025]")   # ("cᵃ", "15,2025")
+parse_variable_name("σˣ")            # ("σˣ", "")
+```
+"""
+function parse_variable_name(name::String)
+	m = match(r"^(.+?)\[(.+)\]$", name)
+	isnothing(m) && return (name, "")
+	return (m.captures[1], m.captures[2])
+end
+
+"""
+    save(path::AbstractString, d::ModelDictionary)
+
+Save a ModelDictionary to an Arrow file.
+
+The dictionary is stored as a table with columns:
+- `variable`: The base variable name (e.g., "K", "cᵃ")
+- `indices`: The index string (e.g., "2025", "15,2025", "" for scalars)
+- `value`: The numeric value
+
+# Arguments
+- `path`: File path (typically ending in .arrow or .parquet)
+- `d`: The ModelDictionary to save
+
+# Examples
+```julia
+d = value_dict(model)
+save("solution.arrow", d)
+```
+
+See also: [`load`](@ref), [`ModelDictionary`](@ref)
+"""
+function save(path::AbstractString, d::ModelDictionary)
+	rows = NamedTuple{(:variable, :indices, :value), Tuple{String, String, Float64}}[]
+	for (k, v) in pairs(d.dictionary)
+		isnothing(v) && continue
+		base, indices = parse_variable_name(string(k))
+		push!(rows, (; variable=base, indices=indices, value=Float64(v)))
+	end
+	Arrow.write(path, DataFrame(rows))
+end
+
+"""
+    load(path::AbstractString, model::AbstractModel) → ModelDictionary
+
+Load a ModelDictionary from an Arrow file.
+
+Reconstructs variable names from the stored base name and indices,
+then matches them to variables in the provided model.
+
+# Arguments
+- `path`: Path to the Arrow file
+- `model`: The JuMP model to associate with the dictionary
+
+# Returns
+A `ModelDictionary` populated with values from the file.
+Variables in the model that aren't in the file will have `nothing` values.
+
+# Examples
+```julia
+d = load("solution.arrow", model)
+set_start_value(d)  # Use loaded values as starting point
+```
+
+See also: [`save`](@ref), [`ModelDictionary`](@ref)
+"""
+function load(path::AbstractString, model::AbstractModel)
+	df = DataFrame(Arrow.Table(path))
+	d = ModelDictionary(model)
+	for row in eachrow(df)
+		name = isempty(row.indices) ? row.variable : "$(row.variable)[$(row.indices)]"
+		var = variable_by_name(model, name)
+		isnothing(var) && continue
+		d[var] = row.value
+	end
+	return d
+end
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Dot access
