@@ -1,0 +1,23 @@
+# Julia
+Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+
+# Build artifacts
+*.mps
+*.nl
+*.bson
+
+# Development work (not ready for public release)
+dev/
+
+# Editor/IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
