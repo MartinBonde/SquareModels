@@ -20,7 +20,7 @@ JuMP = "1"
 Lazy = "0.15"
 Parquet2 = "0.2"
 StatsBase = "0.34"
-julia = "1.10"
+julia = "1.11"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
