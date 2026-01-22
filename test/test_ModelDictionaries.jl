@@ -697,4 +697,201 @@ end
 # Note: GDX files don't support Unicode symbol names (GAMS limitation).
 # Use ASCII names in GDX and rename when loading into JuMP models with Unicode names.
 
+# =============================================================================
+# Slice specification tests
+# =============================================================================
+
+@testset "Test _parse_slice_spec" begin
+	using SquareModels: _parse_slice_spec
+
+	# Simple rename (no brackets)
+	@test _parse_slice_spec("nPop") == ("nPop", String[], Int[])
+
+	# Single fixed index, single wildcard
+	gdx_sym, fixed, wildcards = _parse_slice_spec("vC[:cTot,:]")
+	@test gdx_sym == "vC"
+	@test fixed == ["cTot"]
+	@test wildcards == [2]
+
+	# Multiple fixed indices, single wildcard
+	gdx_sym, fixed, wildcards = _parse_slice_spec("vK[:iTot,:tot,:]")
+	@test gdx_sym == "vK"
+	@test fixed == ["iTot", "tot"]
+	@test wildcards == [3]
+
+	# Wildcard first
+	gdx_sym, fixed, wildcards = _parse_slice_spec("data[:,:fixed]")
+	@test gdx_sym == "data"
+	@test fixed == ["fixed"]
+	@test wildcards == [1]
+
+	# Multiple wildcards
+	gdx_sym, fixed, wildcards = _parse_slice_spec("matrix[:,:,:fixed,:]")
+	@test gdx_sym == "matrix"
+	@test fixed == ["fixed"]
+	@test wildcards == [1, 2, 4]
+
+	# No colon prefix on fixed index
+	gdx_sym, fixed, wildcards = _parse_slice_spec("vX[xTot,:]")
+	@test gdx_sym == "vX"
+	@test fixed == ["xTot"]
+	@test wildcards == [2]
+end
+
+@testset "Test _build_slice_key" begin
+	using SquareModels: _build_slice_key
+
+	# Single wildcard at end: C[2025] -> vC[:cTot,:] -> "cTot,2025"
+	@test _build_slice_key("2025", ["cTot"], [2]) == "cTot,2025"
+
+	# Multiple fixed indices: K[2025] -> vK[:iTot,:tot,:] -> "iTot,tot,2025"
+	@test _build_slice_key("2025", ["iTot", "tot"], [3]) == "iTot,tot,2025"
+
+	# Wildcard first: X[2025] -> data[:,:fixed] -> "2025,fixed"
+	@test _build_slice_key("2025", ["fixed"], [1]) == "2025,fixed"
+
+	# Multiple wildcards: Z[1,2] -> matrix[:,:,:fixed,:] -> "1,2,fixed,?"
+	# Target has 2 indices, wildcards at positions 1, 2, 4
+	@test _build_slice_key("1,2", ["fixed"], [1, 2, 4]) == "1,2,fixed,"
+
+	# Multi-dimensional target: N_a[15,2025] -> pop[:,:] -> "15,2025"
+	@test _build_slice_key("15,2025", String[], [1, 2]) == "15,2025"
+
+	# No wildcards (all fixed)
+	@test _build_slice_key("", ["a", "b", "c"], Int[]) == "a,b,c"
+end
+
+@testset "Test load with slices - Parquet" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, C[2025:2027])
+		@variable(model, K[2025:2027])
+
+		# Data has higher-dimensional structure
+		data = DataFrame(
+			variable = [
+				"vC", "vC", "vC",  # vC[:cTot, t]
+				"vC", "vC", "vC",  # vC[:cHh, t] (different slice, should be ignored)
+				"vK", "vK", "vK",  # vK[:iTot, :tot, t]
+			],
+			indices = [
+				"cTot,2025", "cTot,2026", "cTot,2027",
+				"cHh,2025", "cHh,2026", "cHh,2027",
+				"iTot,tot,2025", "iTot,tot,2026", "iTot,tot,2027",
+			],
+			value = [
+				100.0, 110.0, 120.0,
+				50.0, 55.0, 60.0,
+				1000.0, 1100.0, 1200.0,
+			]
+		)
+		path = joinpath(tmpdir, "sliced.parquet")
+		Parquet2.writefile(path, data)
+
+		d = load(path, model;
+			C = "vC[:cTot,:]",
+			K = "vK[:iTot,:tot,:]",
+		)
+
+		# C should get vC[:cTot, t] values
+		@test d[C[2025]] == 100.0
+		@test d[C[2026]] == 110.0
+		@test d[C[2027]] == 120.0
+
+		# K should get vK[:iTot, :tot, t] values
+		@test d[K[2025]] == 1000.0
+		@test d[K[2026]] == 1100.0
+		@test d[K[2027]] == 1200.0
+	end
+end
+
+@testset "Test load with slices - GDX" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, X[2025:2027])
+
+		# Create GDX with higher-dimensional data: vX[commodity, year]
+		df = DataFrame(
+			dim1 = ["xTot", "xTot", "xTot", "xOther", "xOther", "xOther"],
+			dim2 = [2025, 2026, 2027, 2025, 2026, 2027],
+			value = [200.0, 220.0, 240.0, 10.0, 11.0, 12.0]
+		)
+
+		path = joinpath(tmpdir, "sliced.gdx")
+		write_gdx(path, "vX" => df)
+
+		d = load(path, model; X = "vX[:xTot,:]")
+
+		# X should get vX[:xTot, t] values
+		@test d[X[2025]] == 200.0
+		@test d[X[2026]] == 220.0
+		@test d[X[2027]] == 240.0
+	end
+end
+
+@testset "Test load with mixed renames and slices" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, N_a[1:3, 2025:2027])  # Simple rename
+		@variable(model, C[2025:2027])          # Slice
+
+		# Create Parquet with both types
+		rows = NamedTuple{(:variable, :indices, :value), Tuple{String, String, Float64}}[]
+
+		# nPop data (simple rename target)
+		for a in 1:3, t in 2025:2027
+			push!(rows, (variable="nPop", indices="$a,$t", value=Float64(a * 1000 + t)))
+		end
+
+		# vC data (slice target)
+		for t in 2025:2027
+			push!(rows, (variable="vC", indices="cTot,$t", value=Float64(t * 10)))
+		end
+
+		path = joinpath(tmpdir, "mixed.parquet")
+		Parquet2.writefile(path, DataFrame(rows))
+
+		d = load(path, model;
+			N_a = "nPop",           # Simple rename
+			C = "vC[:cTot,:]",      # Slice
+		)
+
+		# N_a uses simple rename
+		@test d[N_a[1, 2025]] == 1000.0 + 2025
+		@test d[N_a[2, 2026]] == 2000.0 + 2026
+		@test d[N_a[3, 2027]] == 3000.0 + 2027
+
+		# C uses slice
+		@test d[C[2025]] == 20250.0
+		@test d[C[2026]] == 20260.0
+		@test d[C[2027]] == 20270.0
+	end
+end
+
+@testset "Test load with slices - partial data" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, C[2025:2030])
+
+		# Data only has some years
+		data = DataFrame(
+			variable = ["vC", "vC", "vC"],
+			indices = ["cTot,2025", "cTot,2027", "cTot,2029"],
+			value = [100.0, 120.0, 140.0]
+		)
+		path = joinpath(tmpdir, "partial_slice.parquet")
+		Parquet2.writefile(path, data)
+
+		d = load(path, model; C = "vC[:cTot,:]")
+
+		# Only matching years should be loaded
+		@test d[C[2025]] == 100.0
+		@test isnothing(d[C[2026]])
+		@test d[C[2027]] == 120.0
+		@test isnothing(d[C[2028]])
+		@test d[C[2029]] == 140.0
+		@test isnothing(d[C[2030]])
+	end
+end
+
 end # module

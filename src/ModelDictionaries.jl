@@ -539,7 +539,9 @@ their indices joined with commas.
 - `path`: Path to the Parquet or GDX file
 - `model`: The JuMP model to associate with the dictionary
 - `renames`: Optional name mappings to load variables from differently-named data. Can be passed as keyword arguments
-  or as `Pair` arguments.
+  or as `Pair` arguments. For simple renames, use `ModelVar="GdxName"`. For slicing (extracting a subset of a 
+  higher-dimensional GDX symbol), use the syntax `ModelVar="GdxSymbol[fixed1,fixed2,:,...]"` where `:` marks 
+  positions that correspond to the model variable's indices.
 
 # Returns
 A `ModelDictionary` populated with values from the file.
@@ -553,27 +555,32 @@ set_start_value(d)  # Use loaded values as starting point
 
 # Load with name remapping (similar to GAMS \$LOAD path Y=OtherY;)
 d = load("data.parquet", model, Y => "OtherY", X => "DataX")
-d = load("data.gdx", model; nPop="N_a", nLHh="L_a")
+d = load("data.gdx", model; N_a="nPop", L_a="nLHh")
 
-# Equivalent using keyword syntax
-d = load("data.parquet", model; Y="OtherY", X="DataX")
+# Slice a higher-dimensional GDX symbol into a model variable:
+# If GDX has vC[commodity,t] and model has C[t], extract vC[:cTot,t] into C[t]
+d = load("data.gdx", model;
+    C = "vC[:cTot,:]",      # C[t] ← vC[:cTot, t]
+    X = "vX[:xTot,:]",      # X[t] ← vX[:xTot, t]
+    K = "vK[:iTot,:tot,:]", # K[t] ← vK[:iTot, :tot, t]
+)
 ```
 
 See also: [`save`](@ref), [`ModelDictionary`](@ref)
 """
 function load(path::AbstractString, model::AbstractModel, renames::Pair...; kwargs...)
-	rename_dict = _build_rename_dict(renames, kwargs)
+	rename_dict, slice_dict = _build_rename_and_slice_dicts(renames, kwargs)
 
 	# Dispatch based on file extension
 	if endswith(lowercase(path), ".gdx")
-		return _load_gdx(path, model, rename_dict)
+		return _load_gdx(path, model, rename_dict, slice_dict)
 	else
-		return _load_parquet(path, model, rename_dict)
+		return _load_parquet(path, model, rename_dict, slice_dict)
 	end
 end
 
 """Load from a Parquet file."""
-function _load_parquet(path::AbstractString, model::AbstractModel, rename_dict::Dict{String, String})
+function _load_parquet(path::AbstractString, model::AbstractModel, rename_dict::Dict{String, String}, slice_dict::Dict{String, Tuple{String, Vector{String}, Vector{Int}}})
 	df = DataFrame(Parquet2.Dataset(path))
 
 	# Detect format and convert to standard format if needed
@@ -596,9 +603,18 @@ function _load_parquet(path::AbstractString, model::AbstractModel, rename_dict::
 	d = ModelDictionary(model)
 	for var in all_variables(model)
 		base, indices = _var_to_key(var)
-		# Use renamed base if specified, otherwise use original
-		lookup_base = get(rename_dict, base, base)
-		key = (lookup_base, indices)
+		
+		# Check for slice mapping first
+		if haskey(slice_dict, base)
+			src_symbol, fixed_indices, wildcard_positions = slice_dict[base]
+			lookup_key = _build_slice_key(indices, fixed_indices, wildcard_positions)
+			key = (src_symbol, lookup_key)
+		else
+			# Use renamed base if specified, otherwise use original
+			lookup_base = get(rename_dict, base, base)
+			key = (lookup_base, indices)
+		end
+		
 		if haskey(data_index, key)
 			d[var] = data_index[key]
 		end
@@ -607,7 +623,7 @@ function _load_parquet(path::AbstractString, model::AbstractModel, rename_dict::
 end
 
 """Load from a GDX file using GAMS.jl's read_gdx."""
-function _load_gdx(path::AbstractString, model::AbstractModel, rename_dict::Dict{String, String})
+function _load_gdx(path::AbstractString, model::AbstractModel, rename_dict::Dict{String, String}, slice_dict::Dict{String, Tuple{String, Vector{String}, Vector{Int}}})
 	gdx = read_gdx(path)
 
 	# Build index for O(1) lookup: (variable, indices) => value
@@ -640,9 +656,18 @@ function _load_gdx(path::AbstractString, model::AbstractModel, rename_dict::Dict
 	d = ModelDictionary(model)
 	for var in all_variables(model)
 		base, indices = _var_to_key(var)
-		# Use renamed base if specified, otherwise use original
-		lookup_base = get(rename_dict, base, base)
-		key = (lookup_base, indices)
+		
+		# Check for slice mapping first
+		if haskey(slice_dict, base)
+			gdx_symbol, fixed_indices, wildcard_positions = slice_dict[base]
+			lookup_key = _build_slice_key(indices, fixed_indices, wildcard_positions)
+			key = (gdx_symbol, lookup_key)
+		else
+			# Use renamed base if specified, otherwise use original
+			lookup_base = get(rename_dict, base, base)
+			key = (lookup_base, indices)
+		end
+		
 		if haskey(data_index, key)
 			d[var] = data_index[key]
 		end
@@ -650,25 +675,44 @@ function _load_gdx(path::AbstractString, model::AbstractModel, rename_dict::Dict
 	return d
 end
 
-"""Build rename dictionary from Pair arguments and keyword arguments."""
-function _build_rename_dict(renames::Tuple, kwargs)
+"""
+Build rename and slice dictionaries from Pair arguments and keyword arguments.
+
+Values containing brackets (e.g., "vC[:cTot,:]") are parsed as slice specifications.
+Simple strings are treated as renames.
+"""
+function _build_rename_and_slice_dicts(renames::Tuple, kwargs)
 	rename_dict = Dict{String, String}()
+	slice_dict = Dict{String, Tuple{String, Vector{String}, Vector{Int}}}()
+	
+	function process_mapping(model_var::String, spec::String)
+		if contains(spec, "[")
+			# Slice specification
+			gdx_symbol, fixed_indices, wildcard_positions = _parse_slice_spec(spec)
+			slice_dict[model_var] = (gdx_symbol, fixed_indices, wildcard_positions)
+		else
+			# Simple rename
+			rename_dict[model_var] = spec
+		end
+	end
+	
 	for (k, v) in renames
-		rename_dict[_to_base_name(k)] = string(v)
+		process_mapping(_to_base_name(k), string(v))
 	end
 	for (k, v) in pairs(kwargs)
-		rename_dict[string(k)] = string(v)
+		process_mapping(string(k), string(v))
 	end
-	return rename_dict
+	
+	return rename_dict, slice_dict
 end
 
-"""Extract base variable name from various input types."""
+"""Extract base variable name from various input types. Always returns String."""
 _to_base_name(x::Symbol) = string(x)
-_to_base_name(x::AbstractString) = x
-_to_base_name(x::AbstractVariableRef) = first(parse_variable_name(name(x)))
+_to_base_name(x::AbstractString) = String(x)
+_to_base_name(x::AbstractVariableRef) = String(first(parse_variable_name(name(x))))
 function _to_base_name(x::AbstractArray{<:AbstractVariableRef})
 	# For JuMP variable containers, extract base name from first element
-	first(parse_variable_name(name(first(x))))
+	String(first(parse_variable_name(name(first(x)))))
 end
 
 """Convert Gekko parquet format to simple (variable, indices, value) format."""
@@ -706,6 +750,91 @@ E.g., x → ("x", ""), y[1,2] → ("y", "1,2")
 function _var_to_key(var::AbstractVariableRef)
 	base, indices = parse_variable_name(name(var))
 	return (base, indices)
+end
+
+"""
+Parse a slice specification string into (gdx_symbol, fixed_indices, wildcard_positions).
+
+The string format is "symbol[idx1,idx2,...]" where:
+- Fixed indices (like :cTot or cTot) become part of the lookup key
+- Wildcards (:) indicate positions that should be filled from the target variable's indices
+
+# Examples
+```julia
+_parse_slice_spec("vC[:cTot,:]")   # ("vC", ["cTot"], [2])
+_parse_slice_spec("vK[:iTot,:tot,:]")  # ("vK", ["iTot", "tot"], [3])
+_parse_slice_spec("nPop")  # ("nPop", [], [])  - simple rename
+```
+"""
+function _parse_slice_spec(spec::AbstractString)
+	# Handle simple rename case (no brackets)
+	m = match(r"^([^\[]+)\[(.+)\]$", spec)
+	isnothing(m) && return (spec, String[], Int[])
+	
+	gdx_symbol = m.captures[1]
+	indices_str = m.captures[2]
+	
+	# Split by comma, respecting that indices might contain colons
+	parts = split(indices_str, ",")
+	
+	fixed_indices = String[]
+	wildcard_positions = Int[]
+	
+	for (i, part) in enumerate(parts)
+		part = strip(part)
+		if part == ":"
+			push!(wildcard_positions, i)
+		else
+			# Strip leading colon if present (e.g., :cTot -> cTot)
+			idx = startswith(part, ":") ? part[2:end] : part
+			push!(fixed_indices, idx)
+		end
+	end
+	
+	return (gdx_symbol, fixed_indices, wildcard_positions)
+end
+
+"""
+Build the GDX lookup key for a slice mapping.
+
+Given a target variable's indices and a slice specification, constructs the
+indices string that should be looked up in the GDX file.
+
+# Arguments
+- `target_indices`: Indices from the target variable (e.g., "2025" or "15,2025")
+- `fixed_indices`: Fixed parts of the slice (e.g., ["cTot"])
+- `wildcard_positions`: Positions where target indices should be inserted
+
+# Example
+For target C[2025] with slice "vC[:cTot,:]":
+- target_indices = "2025"
+- fixed_indices = ["cTot"]
+- wildcard_positions = [2]
+- Result: "cTot,2025"
+"""
+function _build_slice_key(target_indices::AbstractString, fixed_indices::Vector{String}, wildcard_positions::Vector{Int})
+	isempty(wildcard_positions) && return join(fixed_indices, ",")
+	
+	target_parts = isempty(target_indices) ? String[] : split(target_indices, ",")
+	
+	# Total positions = fixed + wildcards
+	total_positions = length(fixed_indices) + length(wildcard_positions)
+	result = Vector{String}(undef, total_positions)
+	
+	fixed_idx = 1
+	target_idx = 1
+	
+	for pos in 1:total_positions
+		if pos in wildcard_positions
+			result[pos] = target_idx <= length(target_parts) ? string(target_parts[target_idx]) : ""
+			target_idx += 1
+		else
+			result[pos] = fixed_indices[fixed_idx]
+			fixed_idx += 1
+		end
+	end
+	
+	return join(result, ",")
 end
 
 # ----------------------------------------------------------------------------------------------------------------------
