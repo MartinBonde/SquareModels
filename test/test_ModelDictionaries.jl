@@ -6,7 +6,9 @@ using SquareModels
 using Dictionaries
 using Parquet2
 using DataFrames
-using GAMS: write_gdx
+
+# GAMS is optional - GDX tests only run when GAMS is available
+const HAS_GAMS = try @eval using GAMS: write_gdx; true catch; false end
 
 model = Model()
 vars = @variables model begin
@@ -573,8 +575,10 @@ end
 end
 
 # =============================================================================
-# GDX file tests
+# GDX file tests (only run when GAMS is available)
 # =============================================================================
+
+if HAS_GAMS
 
 @testset "Test load from GDX - basic" begin
 	mktempdir() do tmpdir
@@ -694,6 +698,8 @@ end
 	end
 end
 
+end # if HAS_GAMS
+
 # Note: GDX files don't support Unicode symbol names (GAMS limitation).
 # Use ASCII names in GDX and rename when loading into JuMP models with Unicode names.
 
@@ -805,6 +811,7 @@ end
 	end
 end
 
+if HAS_GAMS
 @testset "Test load with slices - GDX" begin
 	mktempdir() do tmpdir
 		model = Model()
@@ -828,6 +835,7 @@ end
 		@test d[X[2027]] == 240.0
 	end
 end
+end # if HAS_GAMS
 
 @testset "Test load with mixed renames and slices" begin
 	mktempdir() do tmpdir
