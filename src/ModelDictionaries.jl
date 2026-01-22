@@ -136,9 +136,10 @@ Base.copy(md::ModelDictionary) = ModelDictionary(md.model, copy(md.dictionary))
 
 """Add any missing JuMP variables to the ModelDictionary"""
 function update!(md::ModelDictionary)
-	for v in Symbol.(all_variables(md.model))
-		if v ∉ keys(md.dictionary)
-			insert!(md.dictionary, v, nothing)
+	for v in all_variables(md.model)
+		sym = Symbol(name(v))
+		if sym ∉ keys(md.dictionary)
+			insert!(md.dictionary, sym, nothing)
 		end
 	end
 end
@@ -148,6 +149,7 @@ function Base.setindex!(d::ModelDictionary, value, index::Symbol)
 	index ∉ keys(d.dictionary) && index ∈ keys(d.model.obj_dict) && return setindex!(d, value, d.model.obj_dict[index])
 	return setindex!(d.dictionary, value, index)
 end
+Base.setindex!(d::ModelDictionary, value, index::AbstractVariableRef) = setindex!(d, value, Symbol(name(index)))
 Base.setindex!(d::ModelDictionary, value, index) = setindex!(d, value, Symbol(index))
 Base.setindex!(d::ModelDictionary, value, index::AbstractArray) = setindex!.(Ref(d), value, index)
 
@@ -158,6 +160,7 @@ function Base.getindex(d::ModelDictionary, index::Symbol)
 	index ∈ keys(d.model.obj_dict) && return getindex(d, d.model.obj_dict[index])
 	return d.dictionary[index] # IndexError
 end
+Base.getindex(d::ModelDictionary, index::AbstractVariableRef) = getindex(d, Symbol(name(index)))
 Base.getindex(d::ModelDictionary, index) = getindex(d, Symbol(index))
 function Base.getindex(d::ModelDictionary, container::AbstractArray{Symbol})
 	update!(d)
@@ -167,6 +170,7 @@ function Base.getindex(d::ModelDictionary, container::AbstractArray{Symbol})
 	data_view = @view(d.dictionary.values[idx])
 	return create_window(data_view, container)
 end
+Base.getindex(d::ModelDictionary, container::AbstractArray{<:AbstractVariableRef}) = getindex(d, Symbol.(name.(container)))
 Base.getindex(d::ModelDictionary, container::AbstractArray) = getindex(d, Symbol.(container))
 
 # Filtering with a boolean ModelDictionary (e.g., d[d .> 0])
@@ -244,6 +248,23 @@ Base.getindex(w::Window, indices...) = getindex.(Ref(w.data_view), w.indices[ind
 
 Base.setindex!(w::Window, value, index::AbstractArray) = setindex!.(Ref(w), value, index)
 Base.setindex!(w::Window, value, indices...) = setindex!.(Ref(w.data_view), value, w.indices[indices...])
+
+# Additional array methods for Window
+Base.vec(w::Window) = vec(collect(w))
+
+# Broadcasting support for Window - use shaped_view as the broadcastable representation
+Base.broadcastable(w::Window) = w.shaped_view
+
+# For broadcast assignment (w .= x), materialize into the underlying data
+function Base.materialize!(w::Window, bc::Base.Broadcast.Broadcasted)
+	result = Base.materialize(bc)
+	if result isa AbstractArray
+		w.data_view .= vec(result)
+	else
+		w.data_view .= result  # scalar broadcast
+	end
+	return w
+end
 
 Base.in(index::Symbol, d::ModelDictionary) = index ∈ keys(d.dictionary)
 Base.in(index, d::ModelDictionary) = Symbol(index) ∈ d
@@ -499,7 +520,8 @@ function save(path::AbstractString, d::ModelDictionary)
 end
 
 """
-    load(path::AbstractString, model::AbstractModel) → ModelDictionary
+    load(path::AbstractString, model::AbstractModel; renames...) → ModelDictionary
+    load(path::AbstractString, model::AbstractModel, renames::Pair...) → ModelDictionary
 
 Load a ModelDictionary from a Parquet file.
 
@@ -512,6 +534,8 @@ Supports both the simple format (variable, indices, value) and Gekko's format
 # Arguments
 - `path`: Path to the Parquet file
 - `model`: The JuMP model to associate with the dictionary
+- `renames`: Optional name mappings to load variables from differently-named data. Can be passed as keyword arguments
+  or as `Pair` arguments.
 
 # Returns
 A `ModelDictionary` populated with values from the file.
@@ -521,11 +545,18 @@ Variables in the model that aren't in the file will have `nothing` values.
 ```julia
 d = load("solution.parquet", model)
 set_start_value(d)  # Use loaded values as starting point
+
+# Load with name remapping (similar to GAMS \$LOAD path Y=OtherY;)
+d = load("data.parquet", model, Y => "OtherY", X => "DataX")
+
+# Equivalent using keyword syntax
+d = load("data.parquet", model; Y="OtherY", X="DataX")
 ```
 
 See also: [`save`](@ref), [`ModelDictionary`](@ref)
 """
-function load(path::AbstractString, model::AbstractModel)
+function load(path::AbstractString, model::AbstractModel, renames::Pair...; kwargs...)
+	rename_dict = _build_rename_dict(renames, kwargs)
 	df = DataFrame(Parquet2.Dataset(path))
 
 	# Detect format and convert to standard format if needed
@@ -547,12 +578,36 @@ function load(path::AbstractString, model::AbstractModel)
 
 	d = ModelDictionary(model)
 	for var in all_variables(model)
-		key = _var_to_key(var)
+		base, indices = _var_to_key(var)
+		# Use renamed base if specified, otherwise use original
+		lookup_base = get(rename_dict, base, base)
+		key = (lookup_base, indices)
 		if haskey(data_index, key)
 			d[var] = data_index[key]
 		end
 	end
 	return d
+end
+
+"""Build rename dictionary from Pair arguments and keyword arguments."""
+function _build_rename_dict(renames::Tuple, kwargs)
+	rename_dict = Dict{String, String}()
+	for (k, v) in renames
+		rename_dict[_to_base_name(k)] = string(v)
+	end
+	for (k, v) in pairs(kwargs)
+		rename_dict[string(k)] = string(v)
+	end
+	return rename_dict
+end
+
+"""Extract base variable name from various input types."""
+_to_base_name(x::Symbol) = string(x)
+_to_base_name(x::AbstractString) = x
+_to_base_name(x::AbstractVariableRef) = first(parse_variable_name(name(x)))
+function _to_base_name(x::AbstractArray{<:AbstractVariableRef})
+	# For JuMP variable containers, extract base name from first element
+	first(parse_variable_name(name(first(x))))
 end
 
 """Convert Gekko parquet format to simple (variable, indices, value) format."""

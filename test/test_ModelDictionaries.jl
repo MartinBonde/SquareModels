@@ -466,4 +466,109 @@ end
 	end
 end
 
+@testset "Test load with renames" begin
+	model = Model()
+	@variable(model, Y[1:3])
+	@variable(model, X)
+	@variable(model, Z)
+
+	mktempdir() do tmpdir
+		# Data has different names than model
+		data = DataFrame(
+			variable = ["OtherY", "OtherY", "OtherY", "DataX"],
+			indices = ["1", "2", "3", ""],
+			value = [10.0, 20.0, 30.0, 100.0]
+		)
+		path = joinpath(tmpdir, "renamed.parquet")
+		Parquet2.writefile(path, data)
+
+		# Test Pair syntax
+		d = load(path, model, Y => "OtherY", X => "DataX")
+		@test d[Y[1]] == 10.0
+		@test d[Y[2]] == 20.0
+		@test d[Y[3]] == 30.0
+		@test d[X] == 100.0
+		@test isnothing(d[Z])
+
+		# Test keyword syntax
+		d2 = load(path, model; Y="OtherY", X="DataX")
+		@test d2[Y[1]] == 10.0
+		@test d2[X] == 100.0
+
+		# Test Symbol key in Pair
+		d3 = load(path, model, :Y => "OtherY")
+		@test d3[Y[1]] == 10.0
+	end
+end
+
+@testset "Test load with renames - Gekko format" begin
+	# Test with the Gekko format test file
+	baseline_path = joinpath(@__DIR__, "test_gekko_format.parquet")
+	if isfile(baseline_path)
+		model = Model()
+		@variable(model, N_a[0:5, 2029:2031])
+
+		d = load(baseline_path, model; N_a="nPop")
+
+		# nPop data exists for ages 0+ and years 2029+
+		@test d[N_a[0, 2029]] ≈ 63.861139166386145
+		@test d[N_a[1, 2029]] ≈ 63.326547140764674
+		@test !isnothing(d[N_a[5, 2031]])
+	end
+end
+
+@testset "Test load with renames - mismatched indices" begin
+	model = Model()
+	# Model has indices 5:7, data will have indices 1:10
+	@variable(model, Y[5:7])
+
+	mktempdir() do tmpdir
+		# Data has more indices than model (1:10 vs model's 5:7)
+		data = DataFrame(
+			variable = ["DataY", "DataY", "DataY", "DataY", "DataY", "DataY", "DataY", "DataY", "DataY", "DataY"],
+			indices = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+			value = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+		)
+		path = joinpath(tmpdir, "mismatch.parquet")
+		Parquet2.writefile(path, data)
+
+		d = load(path, model, Y => "DataY")
+
+		# Only model indices 5, 6, 7 should be loaded
+		@test d[Y[5]] == 5.0
+		@test d[Y[6]] == 6.0
+		@test d[Y[7]] == 7.0
+
+		# Data indices outside model range (1-4, 8-10) are ignored - no error
+		@test length(d) == 3
+	end
+end
+
+@testset "Test load with renames - missing data indices" begin
+	model = Model()
+	# Model has indices 1:5, data only has 2:3
+	@variable(model, Y[1:5])
+
+	mktempdir() do tmpdir
+		data = DataFrame(
+			variable = ["DataY", "DataY"],
+			indices = ["2", "3"],
+			value = [20.0, 30.0]
+		)
+		path = joinpath(tmpdir, "partial.parquet")
+		Parquet2.writefile(path, data)
+
+		d = load(path, model, Y => "DataY")
+
+		# Indices with data are loaded
+		@test d[Y[2]] == 20.0
+		@test d[Y[3]] == 30.0
+
+		# Model indices without data are nothing
+		@test isnothing(d[Y[1]])
+		@test isnothing(d[Y[4]])
+		@test isnothing(d[Y[5]])
+	end
+end
+
 end # module
