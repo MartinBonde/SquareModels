@@ -4,6 +4,7 @@
 using Dictionaries
 using Parquet2
 using DataFrames
+using GAMS: read_gdx, GDXFile
 
 """
     ModelDictionary
@@ -523,16 +524,19 @@ end
     load(path::AbstractString, model::AbstractModel; renames...) → ModelDictionary
     load(path::AbstractString, model::AbstractModel, renames::Pair...) → ModelDictionary
 
-Load a ModelDictionary from a Parquet file.
+Load a ModelDictionary from a Parquet or GDX file.
 
 Iterates over all variables in the model and looks up their values in the data file.
 Variables not found in the file will have `nothing` values.
 
-Supports both the simple format (variable, indices, value) and Gekko's format
+For Parquet files, supports both the simple format (variable, indices, value) and Gekko's format
 (with id, name, dim1, dim2, period, value columns).
 
+For GDX files, reads parameters and uses their values. Multi-dimensional parameters have
+their indices joined with commas.
+
 # Arguments
-- `path`: Path to the Parquet file
+- `path`: Path to the Parquet or GDX file
 - `model`: The JuMP model to associate with the dictionary
 - `renames`: Optional name mappings to load variables from differently-named data. Can be passed as keyword arguments
   or as `Pair` arguments.
@@ -544,10 +548,12 @@ Variables in the model that aren't in the file will have `nothing` values.
 # Examples
 ```julia
 d = load("solution.parquet", model)
+d = load("data.gdx", model)
 set_start_value(d)  # Use loaded values as starting point
 
 # Load with name remapping (similar to GAMS \$LOAD path Y=OtherY;)
 d = load("data.parquet", model, Y => "OtherY", X => "DataX")
+d = load("data.gdx", model; nPop="N_a", nLHh="L_a")
 
 # Equivalent using keyword syntax
 d = load("data.parquet", model; Y="OtherY", X="DataX")
@@ -557,6 +563,17 @@ See also: [`save`](@ref), [`ModelDictionary`](@ref)
 """
 function load(path::AbstractString, model::AbstractModel, renames::Pair...; kwargs...)
 	rename_dict = _build_rename_dict(renames, kwargs)
+
+	# Dispatch based on file extension
+	if endswith(lowercase(path), ".gdx")
+		return _load_gdx(path, model, rename_dict)
+	else
+		return _load_parquet(path, model, rename_dict)
+	end
+end
+
+"""Load from a Parquet file."""
+function _load_parquet(path::AbstractString, model::AbstractModel, rename_dict::Dict{String, String})
 	df = DataFrame(Parquet2.Dataset(path))
 
 	# Detect format and convert to standard format if needed
@@ -574,6 +591,50 @@ function load(path::AbstractString, model::AbstractModel, renames::Pair...; kwar
 	data_index = Dict{Tuple{String, String}, Float64}()
 	for row in eachrow(data_df)
 		data_index[(row.variable, row.indices)] = row.value
+	end
+
+	d = ModelDictionary(model)
+	for var in all_variables(model)
+		base, indices = _var_to_key(var)
+		# Use renamed base if specified, otherwise use original
+		lookup_base = get(rename_dict, base, base)
+		key = (lookup_base, indices)
+		if haskey(data_index, key)
+			d[var] = data_index[key]
+		end
+	end
+	return d
+end
+
+"""Load from a GDX file using GAMS.jl's read_gdx."""
+function _load_gdx(path::AbstractString, model::AbstractModel, rename_dict::Dict{String, String})
+	gdx = read_gdx(path)
+
+	# Build index for O(1) lookup: (variable, indices) => value
+	# GDX parameters have domain columns + a value column
+	data_index = Dict{Tuple{String, String}, Float64}()
+
+	for sym_name in keys(gdx.symbols)
+		sym = gdx.symbols[sym_name]
+		df = sym.records
+		isempty(df) && continue
+
+		# Get the value column name (differs by symbol type)
+		value_col = if hasproperty(df, :value)
+			:value
+		elseif hasproperty(df, :level)
+			:level
+		else
+			continue
+		end
+
+		# Get domain columns (all columns except value/level/marginal/etc.)
+		domain_cols = [n for n in names(df) if n ∉ ("value", "level", "marginal", "lower", "upper", "scale")]
+
+		for row in eachrow(df)
+			indices_str = join([string(row[col]) for col in domain_cols], ",")
+			data_index[(string(sym_name), indices_str)] = row[value_col]
+		end
 	end
 
 	d = ModelDictionary(model)

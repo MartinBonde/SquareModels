@@ -6,6 +6,7 @@ using SquareModels
 using Dictionaries
 using Parquet2
 using DataFrames
+using GAMS: write_gdx
 
 model = Model()
 vars = @variables model begin
@@ -570,5 +571,130 @@ end
 		@test isnothing(d[Y[5]])
 	end
 end
+
+# =============================================================================
+# GDX file tests
+# =============================================================================
+
+@testset "Test load from GDX - basic" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, x)
+		@variable(model, y[1:3])
+
+		# Create a GDX file with test data
+		scalar_df = DataFrame(value = [1.5])
+		indexed_df = DataFrame(dim1 = [1, 2, 3], value = [2.0, 3.0, 4.0])
+
+		path = joinpath(tmpdir, "test.gdx")
+		write_gdx(path, "x" => scalar_df, "y" => indexed_df)
+
+		d = load(path, model)
+		@test d isa ModelDictionary
+		@test d[x] == 1.5
+		@test d[y[1]] == 2.0
+		@test d[y[2]] == 3.0
+		@test d[y[3]] == 4.0
+	end
+end
+
+@testset "Test load from GDX - multi-dimensional" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, z[1:2, [:a, :b]])
+
+		# Create a GDX file with 2D data
+		df = DataFrame(
+			dim1 = [1, 1, 2, 2],
+			dim2 = ["a", "b", "a", "b"],
+			value = [10.0, 20.0, 30.0, 40.0]
+		)
+
+		path = joinpath(tmpdir, "test2d.gdx")
+		write_gdx(path, "z" => df)
+
+		d = load(path, model)
+		@test d[z[1, :a]] == 10.0
+		@test d[z[1, :b]] == 20.0
+		@test d[z[2, :a]] == 30.0
+		@test d[z[2, :b]] == 40.0
+	end
+end
+
+@testset "Test load from GDX - with renames" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, Y[1:3])
+		@variable(model, X)
+		@variable(model, Z)
+
+		# Create GDX with different names than model
+		scalar_df = DataFrame(value = [100.0])
+		indexed_df = DataFrame(dim1 = [1, 2, 3], value = [10.0, 20.0, 30.0])
+
+		path = joinpath(tmpdir, "renamed.gdx")
+		write_gdx(path, "DataX" => scalar_df, "OtherY" => indexed_df)
+
+		# Test Pair syntax
+		d = load(path, model, Y => "OtherY", X => "DataX")
+		@test d[Y[1]] == 10.0
+		@test d[Y[2]] == 20.0
+		@test d[Y[3]] == 30.0
+		@test d[X] == 100.0
+		@test isnothing(d[Z])
+
+		# Test keyword syntax
+		d2 = load(path, model; Y="OtherY", X="DataX")
+		@test d2[Y[1]] == 10.0
+		@test d2[X] == 100.0
+	end
+end
+
+@testset "Test load from GDX - partial data" begin
+	mktempdir() do tmpdir
+		model = Model()
+		@variable(model, x)
+		@variable(model, y[1:3])
+
+		# GDX only has x, not y
+		df = DataFrame(value = [1.0])
+
+		path = joinpath(tmpdir, "partial.gdx")
+		write_gdx(path, "x" => df)
+
+		d = load(path, model)
+		@test d[x] == 1.0
+		@test isnothing(d[y[1]])
+		@test isnothing(d[y[2]])
+		@test isnothing(d[y[3]])
+	end
+end
+
+@testset "Test load from GDX - indices outside model range" begin
+	mktempdir() do tmpdir
+		# Model has limited index range
+		model = Model()
+		@variable(model, a[2025:2027])
+
+		# GDX has indices outside model range
+		df = DataFrame(
+			dim1 = [2024, 2025, 2026, 2027, 2028],
+			value = [1.0, 2.0, 3.0, 4.0, 5.0]
+		)
+
+		path = joinpath(tmpdir, "range.gdx")
+		write_gdx(path, "a" => df)
+
+		d = load(path, model)
+
+		# Only model indices should be loaded
+		@test d[a[2025]] == 2.0
+		@test d[a[2026]] == 3.0
+		@test d[a[2027]] == 4.0
+	end
+end
+
+# Note: GDX files don't support Unicode symbol names (GAMS limitation).
+# Use ASCII names in GDX and rename when loading into JuMP models with Unicode names.
 
 end # module
