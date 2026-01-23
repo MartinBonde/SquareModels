@@ -4,6 +4,7 @@
 using Dictionaries
 using Parquet2
 using DataFrames
+import GAMS
 
 """
     ModelDictionary
@@ -538,8 +539,8 @@ their indices joined with commas.
 - `path`: Path to the Parquet or GDX file
 - `model`: The JuMP model to associate with the dictionary
 - `renames`: Optional name mappings to load variables from differently-named data. Can be passed as keyword arguments
-  or as `Pair` arguments. For simple renames, use `ModelVar="GdxName"`. For slicing (extracting a subset of a 
-  higher-dimensional GDX symbol), use the syntax `ModelVar="GdxSymbol[fixed1,fixed2,:,...]"` where `:` marks 
+  or as `Pair` arguments. For simple renames, use `ModelVar="GdxName"`. For slicing (extracting a subset of a
+  higher-dimensional GDX symbol), use the syntax `ModelVar="GdxSymbol[fixed1,fixed2,:,...]"` where `:` marks
   positions that correspond to the model variable's indices.
 
 # Returns
@@ -578,9 +579,56 @@ function load(path::AbstractString, model::AbstractModel, renames::Pair...; kwar
 	end
 end
 
-# Stub for GDX loading - overridden by GAMSExt when GAMS.jl is loaded
+"""Load from a GDX file using GAMS.jl's read_gdx."""
 function _load_gdx(path::AbstractString, model::AbstractModel, rename_dict::Dict{String, String}, slice_dict::Dict{String, Tuple{String, Vector{String}, Vector{Int}}})
-	error("Loading GDX files requires GAMS.jl. Load it with: using GAMS")
+	gdx = GAMS.read_gdx(path)
+
+	# Build index for O(1) lookup: (variable, indices) => value
+	data_index = Dict{Tuple{String, String}, Float64}()
+
+	for sym_name in keys(gdx.symbols)
+		sym = gdx.symbols[sym_name]
+		df = sym.records
+		isempty(df) && continue
+
+		# Get the value column name (differs by symbol type)
+		value_col = if hasproperty(df, :value)
+			:value
+		elseif hasproperty(df, :level)
+			:level
+		else
+			continue
+		end
+
+		# Get domain columns (all columns except value/level/marginal/etc.)
+		domain_cols = [n for n in names(df) if n ∉ ("value", "level", "marginal", "lower", "upper", "scale")]
+
+		for row in eachrow(df)
+			indices_str = join([string(row[col]) for col in domain_cols], ",")
+			data_index[(string(sym_name), indices_str)] = row[value_col]
+		end
+	end
+
+	d = ModelDictionary(model)
+	for var in all_variables(model)
+		base, indices = _var_to_key(var)
+
+		# Check for slice mapping first
+		if haskey(slice_dict, base)
+			gdx_symbol, fixed_indices, wildcard_positions = slice_dict[base]
+			lookup_key = _build_slice_key(indices, fixed_indices, wildcard_positions)
+			key = (gdx_symbol, lookup_key)
+		else
+			# Use renamed base if specified, otherwise use original
+			lookup_base = get(rename_dict, base, base)
+			key = (lookup_base, indices)
+		end
+
+		if haskey(data_index, key)
+			d[var] = data_index[key]
+		end
+	end
+	return d
 end
 
 """Load from a Parquet file."""
@@ -607,7 +655,7 @@ function _load_parquet(path::AbstractString, model::AbstractModel, rename_dict::
 	d = ModelDictionary(model)
 	for var in all_variables(model)
 		base, indices = _var_to_key(var)
-		
+
 		# Check for slice mapping first
 		if haskey(slice_dict, base)
 			src_symbol, fixed_indices, wildcard_positions = slice_dict[base]
@@ -618,7 +666,7 @@ function _load_parquet(path::AbstractString, model::AbstractModel, rename_dict::
 			lookup_base = get(rename_dict, base, base)
 			key = (lookup_base, indices)
 		end
-		
+
 		if haskey(data_index, key)
 			d[var] = data_index[key]
 		end
@@ -636,7 +684,7 @@ Simple strings are treated as renames.
 function _build_rename_and_slice_dicts(renames::Tuple, kwargs)
 	rename_dict = Dict{String, String}()
 	slice_dict = Dict{String, Tuple{String, Vector{String}, Vector{Int}}}()
-	
+
 	function process_mapping(model_var::String, spec::String)
 		if contains(spec, "[")
 			# Slice specification
@@ -647,14 +695,14 @@ function _build_rename_and_slice_dicts(renames::Tuple, kwargs)
 			rename_dict[model_var] = spec
 		end
 	end
-	
+
 	for (k, v) in renames
 		process_mapping(_to_base_name(k), string(v))
 	end
 	for (k, v) in pairs(kwargs)
 		process_mapping(string(k), string(v))
 	end
-	
+
 	return rename_dict, slice_dict
 end
 
@@ -722,16 +770,16 @@ function _parse_slice_spec(spec::AbstractString)
 	# Handle simple rename case (no brackets)
 	m = match(r"^([^\[]+)\[(.+)\]$", spec)
 	isnothing(m) && return (spec, String[], Int[])
-	
+
 	gdx_symbol = m.captures[1]
 	indices_str = m.captures[2]
-	
+
 	# Split by comma, respecting that indices might contain colons
 	parts = split(indices_str, ",")
-	
+
 	fixed_indices = String[]
 	wildcard_positions = Int[]
-	
+
 	for (i, part) in enumerate(parts)
 		part = strip(part)
 		if part == ":"
@@ -742,7 +790,7 @@ function _parse_slice_spec(spec::AbstractString)
 			push!(fixed_indices, idx)
 		end
 	end
-	
+
 	return (gdx_symbol, fixed_indices, wildcard_positions)
 end
 
@@ -766,16 +814,16 @@ For target C[2025] with slice "vC[:cTot,:]":
 """
 function _build_slice_key(target_indices::AbstractString, fixed_indices::Vector{String}, wildcard_positions::Vector{Int})
 	isempty(wildcard_positions) && return join(fixed_indices, ",")
-	
+
 	target_parts = isempty(target_indices) ? String[] : split(target_indices, ",")
-	
+
 	# Total positions = fixed + wildcards
 	total_positions = length(fixed_indices) + length(wildcard_positions)
 	result = Vector{String}(undef, total_positions)
-	
+
 	fixed_idx = 1
 	target_idx = 1
-	
+
 	for pos in 1:total_positions
 		if pos in wildcard_positions
 			result[pos] = target_idx <= length(target_parts) ? string(target_parts[target_idx]) : ""
@@ -785,7 +833,7 @@ function _build_slice_key(target_indices::AbstractString, fixed_indices::Vector{
 			fixed_idx += 1
 		end
 	end
-	
+
 	return join(result, ",")
 end
 

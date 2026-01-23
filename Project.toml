@@ -6,17 +6,15 @@ authors = ["Martin Kirk Bonde <martin@bonde.dk>"]
 [deps]
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Dictionaries = "85a47980-9c8c-11e8-2b9f-f7ca1fa99fb4"
+GAMS = "1ca51c6a-1b4d-4546-9ae1-53e0a243ab12"
 JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
 Lazy = "50d2b5c4-7a5e-59d5-8109-a42b560f39c0"
 Parquet2 = "98572fba-bba0-415d-956f-fa77e587d26d"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 UnoSolver = "1baa60ac-02f7-4b39-a7a8-2f4f58486b05"
 
-[weakdeps]
-GAMS = "1ca51c6a-1b4d-4546-9ae1-53e0a243ab12"
-
-[extensions]
-GAMSExt = "GAMS"
+[sources]
+GAMS = {url = "https://github.com/MartinBonde/gams.jl"}
 
 [compat]
 DataFrames = "1"
