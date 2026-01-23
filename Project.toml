@@ -12,9 +12,16 @@ Parquet2 = "98572fba-bba0-415d-956f-fa77e587d26d"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 UnoSolver = "1baa60ac-02f7-4b39-a7a8-2f4f58486b05"
 
+[weakdeps]
+GAMS = "1ca51c6a-1b4d-4546-9ae1-53e0a243ab12"
+
+[extensions]
+GAMSExt = "GAMS"
+
 [compat]
 DataFrames = "1"
 Dictionaries = "0.4"
+GAMS = "0.5"
 JuMP = "1"
 Lazy = "0.15"
 Parquet2 = "0.2"
