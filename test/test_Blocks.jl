@@ -4,7 +4,7 @@ using Test
 using JuMP
 using SquareModels
 using JuMP.Containers: DenseAxisArray
-using Ipopt
+using UnoSolver
 
 @testset "copy_variable" begin
 	m = Model()
@@ -75,7 +75,7 @@ end
 end
 
 @testset "@block" begin
-	m = Model(Ipopt.Optimizer)
+	m = Model(UnoSolver.Optimizer)
 	@variables m begin
 		x
 		y[1:5]
@@ -102,7 +102,7 @@ end
 end
 
 @testset "solve block" begin
-	m = Model(Ipopt.Optimizer)
+	m = Model(UnoSolver.Optimizer)
 	@variables m begin
 		x
 		y[1:5]
@@ -122,7 +122,7 @@ end
 end
 
 @testset "_endo_exo!" begin
-	m = Model(Ipopt.Optimizer)
+	m = Model(UnoSolver.Optimizer)
 	@variables m begin
 		x
 		y[1:5]
@@ -163,7 +163,7 @@ end
 end
 
 @testset "@endo_exo!" begin
-	m = Model(Ipopt.Optimizer)
+	m = Model(UnoSolver.Optimizer)
 	@variables m begin
 		x
 		y[1:5]

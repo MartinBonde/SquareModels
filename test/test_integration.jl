@@ -3,10 +3,10 @@ module TestIntegration
 using Test
 using JuMP
 using SquareModels
-using Ipopt
+using UnoSolver
 
 @testset "Market Clearing" begin
-    m = Model(Ipopt.Optimizer)
+    m = Model(UnoSolver.Optimizer)
     set_silent(m)
 
     @variables m begin
@@ -40,7 +40,7 @@ using Ipopt
 end
 
 @testset "Calibration round-trip" begin
-    m = Model(Ipopt.Optimizer)
+    m = Model(UnoSolver.Optimizer)
     set_silent(m)
 
     @variables m begin
@@ -78,7 +78,7 @@ end
 end
 
 @testset "Comparative statics" begin
-    m = Model(Ipopt.Optimizer)
+    m = Model(UnoSolver.Optimizer)
     set_silent(m)
 
     @variables m begin
@@ -117,7 +117,7 @@ end
 end
 
 @testset "Two-good exchange economy" begin
-    m = Model(Ipopt.Optimizer)
+    m = Model(UnoSolver.Optimizer)
     set_silent(m)
 
     @variables m begin
