@@ -15,7 +15,6 @@ UnoSolver = "1baa60ac-02f7-4b39-a7a8-2f4f58486b05"
 [compat]
 DataFrames = "1"
 Dictionaries = "0.4"
-Ipopt = "1.14.0"
 JuMP = "1"
 Lazy = "0.15"
 Parquet2 = "0.2"
