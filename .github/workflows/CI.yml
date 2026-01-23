@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.11', '1']
+        version: ['1.12']
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
