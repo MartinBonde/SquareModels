@@ -31,8 +31,8 @@ end
 	end
 
 	@testset "x" begin
-		c1, v1 = SquareModels.@_block(m, x, x == 1)
-		b1 = SquareModels.Block(m, c1, v1)
+		c1, v1, r1 = SquareModels.@_block(m, x, x == 1)
+		b1 = SquareModels.Block(m, c1, v1, r1)
 		@test typeof(c1) <: AbstractVector{T} where {T <: ConstraintRef}
 		@test typeof(v1) <: AbstractVector{VariableRef}
 		@test length(c1) == length(v1) == length(b1) == 1
@@ -41,8 +41,8 @@ end
 	end
 
 	@testset "y[1:4]" begin
-		c2, v2 = SquareModels.@_block(m, y[i ∈ 1:4], y[i] == 1)
-		b2 = SquareModels.Block(m, c2, v2)
+		c2, v2, r2 = SquareModels.@_block(m, y[i ∈ 1:4], y[i] == 1)
+		b2 = SquareModels.Block(m, c2, v2, r2)
 		@test typeof(c2) <: AbstractVector{T} where {T <: ConstraintRef}
 		@test typeof(v2) <: AbstractVector{VariableRef}
 		@test length(c2) == length(v2) == length(b2) == 4
@@ -51,8 +51,8 @@ end
 	end
 
 	@testset "y[5]" begin
-		c3, v3 = SquareModels.@_block(m, y[i ∈ [5]], y[i] == 1)
-		b3 = SquareModels.Block(m, c3, v3)
+		c3, v3, r3 = SquareModels.@_block(m, y[i ∈ [5]], y[i] == 1)
+		b3 = SquareModels.Block(m, c3, v3, r3)
 		@test typeof(c3) <: AbstractVector{T} where {T <: ConstraintRef}
 		@test typeof(v3) <: AbstractVector{VariableRef}
 		@test length(c3) == length(v3) == length(b3) == 1
@@ -63,8 +63,8 @@ end
 	@testset "z" begin
 		t₁ = 1
 		T = 3
-		c4, v4 = SquareModels.@_block(m, z[i ∈ t₁:T, j ∈ [:a, :b]], z[i, j] == 1)
-		b4 = SquareModels.Block(m, c4, v4)
+		c4, v4, r4 = SquareModels.@_block(m, z[i ∈ t₁:T, j ∈ [:a, :b]], z[i, j] == 1)
+		b4 = SquareModels.Block(m, c4, v4, r4)
 		@test typeof(c4) <: DenseAxisArray{T} where {T <: ConstraintRef}
 		@test typeof(v4) <: DenseAxisArray{VariableRef}
 		@test size(c4) == size(v4) == (T, 2)
@@ -406,14 +406,14 @@ end
 		τ[D,S] # Trade cost from country s to country d
   end
 
-  constraint, variable = SquareModels.@_block(m, C[d ∈ D], w[d] * y[d] == pᶜ[d] * C[d])
+  constraint, variable, residual = SquareModels.@_block(m, C[d ∈ D], w[d] * y[d] == pᶜ[d] * C[d])
   @test isa(constraint, AbstractArray{T} where {T <: ConstraintRef})
   @test isa(variable, AbstractArray{T} where {T <: VariableRef})
-  constraint, variable = SquareModels.@_block(m, c[d ∈ D, s ∈ S], c[d,s] == μ[d,s] * C[d] * (w[s] / pᶜ[d])^(-σ))
+  constraint, variable, residual = SquareModels.@_block(m, c[d ∈ D, s ∈ S], c[d,s] == μ[d,s] * C[d] * (w[s] / pᶜ[d])^(-σ))
   @test isa(constraint, AbstractArray{T} where {T <: ConstraintRef})
   @test isa(variable, AbstractArray{T} where {T <: VariableRef})
 
-  cv_pairs = [
+  cvr_tuples = [
 		SquareModels.@_block(m, C[d ∈ D], w[d] * y[d] == pᶜ[d] * C[d]),
 		SquareModels.@_block(m, c[d ∈ D, s ∈ S], c[d,s] == μ[d,s] * C[d] * (w[s] / pᶜ[d])^(-σ)),
 		SquareModels.@_block(m, pᶜ[d ∈ D], pᶜ[d] * C[d] == ∑(w[s] * c[d,s] for s ∈ S)),
@@ -421,11 +421,11 @@ end
 		SquareModels.@_block(m, X[s ∈ S], X[s] == ∑(c[d,s] for d ∈ D if d ≠ s)),
 		SquareModels.@_block(m, M[d ∈ D], M[d] == ∑(c[d,s] for s ∈ S if d ≠ s))
   ]
-  constraints, variables = collect.(Iterators.flatten.(zip(cv_pairs...)))
+  constraints, variables, residuals = collect.(Iterators.flatten.(zip(cvr_tuples...)))
   @test all(isa.(constraints, ConstraintRef))
   @test all(isa.(variables, VariableRef))
 
-  Block(m, constraints, variables)
+  Block(m, constraints, variables, residuals)
 
   base_model = @block m begin
 		C[d ∈ D],
@@ -512,6 +512,173 @@ end
 		empty = Block(m)
 		@test length(b + empty) == length(b)
 	end
+end
+
+@testset "Residual variables" begin
+	m = Model()
+	@variables m begin
+		x
+		y[1:3]
+		z[1:2, [:a, :b]]
+	end
+
+	@testset "Scalar residual" begin
+		b = @block m begin
+			x, x == 5
+		end
+		# Residual variable should be created
+		@test haskey(m, :x_J)
+		@test is_fixed(m[:x_J])
+		# residuals function should return the residual
+		res = residuals(b)
+		@test length(res) == 1
+		@test name(res[1]) == "x_J"
+	end
+
+	@testset "Vector residual" begin
+		b = @block m begin
+			y[i ∈ 1:3], y[i] == i
+		end
+		# Residual variable should be created with same shape as original
+		@test haskey(m, :y_J)
+		@test length(m[:y_J]) == 3
+		@test all(is_fixed.(m[:y_J]))
+		# residuals function should return all residuals
+		res = residuals(b)
+		@test length(res) == 3
+		@test name(res[1]) == "y_J[1]"
+	end
+
+	@testset "Matrix residual" begin
+		b = @block m begin
+			z[i ∈ 1:2, j ∈ [:a, :b]], z[i, j] == i
+		end
+		@test haskey(m, :z_J)
+		@test size(m[:z_J]) == (2, 2)
+		@test all(is_fixed.(m[:z_J]))
+		res = residuals(b)
+		@test length(res) == 4
+	end
+
+	@testset "Partial index range uses full residual" begin
+		# Create a fresh model
+		m2 = Model()
+		@variable(m2, w[1:5])
+
+		# Define block with subset of indices
+		b1 = @block m2 begin
+			w[i ∈ 1:3], w[i] == i
+		end
+		# Residual should have full shape of original variable
+		@test haskey(m2, :w_J)
+		@test length(m2[:w_J]) == 5
+
+		# Second block with different indices should reuse residual
+		b2 = @block m2 begin
+			w[i ∈ 4:5], w[i] == i
+		end
+		@test length(m2[:w_J]) == 5  # Still same size
+	end
+
+	@testset "Residual substitution in different equation positions" begin
+		# Test residual substitution by fixing endo to wrong value and solving for residual
+		# This verifies the substitution (endo + residual) is happening correctly
+
+		@testset "Endo on LHS (simple)" begin
+			# GDP == C + I + G  =>  (GDP + GDP_J) == C + I + G
+			# Fix GDP=100, C+I+G=180, so GDP_J should be 80
+			m = Model(UnoSolver.Optimizer)
+			@variables m begin
+				GDP
+				C
+				I
+				G
+			end
+			b1 = @block m begin
+				GDP, GDP == C + I + G
+			end
+			@test haskey(m, :GDP_J)
+			fix(GDP, 100, force=true)
+			fix(C, 100, force=true)
+			fix(I, 50, force=true)
+			fix(G, 30, force=true)
+			unfix(m[:GDP_J])
+			optimize!(m)
+			# (100 + GDP_J) == 180 => GDP_J == 80
+			@test value(m[:GDP_J]) ≈ 80 atol=1e-6
+		end
+
+		@testset "Endo with coefficient (not first term)" begin
+			# 2 * a == 10  =>  2 * (a + a_J) == 10
+			# Fix a=4: 2*(4 + a_J) == 10 => a_J = 1
+			m = Model(UnoSolver.Optimizer)
+			@variable(m, a)
+			b2 = @block m begin
+				a, 2 * a == 10
+			end
+			@test haskey(m, :a_J)
+			fix(a, 4, force=true)
+			unfix(m[:a_J])
+			optimize!(m)
+			@test value(m[:a_J]) ≈ 1 atol=1e-6
+		end
+
+		@testset "Endo appears multiple times" begin
+			# b[i] + b[i] == 4  =>  (b[i] + b_J[i]) + (b[i] + b_J[i]) == 4
+			# = 2*(b[i] + b_J[i]) == 4
+			# Fix b[i]=0: 2*(0 + b_J[i]) == 4 => b_J[i] = 2
+			m = Model(UnoSolver.Optimizer)
+			@variable(m, b[1:2])
+			b3 = @block m begin
+				b[i ∈ 1:2], b[i] + b[i] == 4
+			end
+			@test haskey(m, :b_J)
+			fix.(b, 0, force=true)
+			unfix.(m[:b_J])
+			optimize!(m)
+			@test all(value.(m[:b_J]) .≈ 2)
+		end
+
+		@testset "Endo in complex expression (power)" begin
+			# c[i]^2 + c[i] == 6  =>  (c[i] + c_J[i])^2 + (c[i] + c_J[i]) == 6
+			# Fix c=0: (0 + c_J)^2 + (0 + c_J) == 6 => c_J^2 + c_J - 6 = 0
+			# => (c_J+3)(c_J-2) = 0 => c_J = 2 (positive root)
+			m = Model(UnoSolver.Optimizer)
+			@variable(m, c[1:2])
+			b4 = @block m begin
+				c[i ∈ 1:2], c[i]^2 + c[i] == 6
+			end
+			@test haskey(m, :c_J)
+			fix.(c, 0, force=true)
+			unfix.(m[:c_J])
+			set_start_value.(m[:c_J], 2)  # Start near positive root
+			optimize!(m)
+			@test all(value.(m[:c_J]) .≈ 2)
+		end
+
+		@testset "Endo on RHS" begin
+			# Equation: C + I == GDP, endo is GDP
+			# Transformed: C + I == (GDP + GDP_J)
+			# Fix GDP=100, C+I=150: 150 == (100 + GDP_J) => GDP_J = 50
+			m = Model(UnoSolver.Optimizer)
+			@variables m begin
+				GDP
+				C
+				I
+			end
+			b5 = @block m begin
+				GDP, C + I == GDP
+			end
+			@test haskey(m, :GDP_J)
+			fix(GDP, 100, force=true)
+			fix(C, 100, force=true)
+			fix(I, 50, force=true)
+			unfix(m[:GDP_J])
+			optimize!(m)
+			@test value(m[:GDP_J]) ≈ 50 atol=1e-6
+		end
+	end
+
 end
 
 end # Module

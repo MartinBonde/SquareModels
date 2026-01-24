@@ -8,13 +8,15 @@ A JuMP extension for writing modular models with square systems of equations
 module SquareModels
 
 export @block, Block, @endo_exo!, delete!
-export constraints, variables, overlaps, shared_variables
+export constraints, variables, residuals, overlaps, shared_variables
 export ModelDictionary, fix, unfix, set_start_value, value, value_dict
 export save, load
+export RESIDUAL_SUFFIX
 
 # Constraints are named after the associated endogenous variable
 # A prefix is added as a constraint and variable cannot share the same name
 CONSTRAINT_PREFIX = "E_"
+RESIDUAL_SUFFIX = "_J"  # Suffix for residual variables (J for "junk" or adjustment)
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Blocks
@@ -69,9 +71,10 @@ struct Block
 	model::AbstractModel
 	constraints::Vector{ConstraintRef}
 	variables::Vector{VariableRef}
+	residuals::Vector{VariableRef}
 	_variable_set::Set{VariableRef}
 
-	function Block(model::AbstractModel, constraints::Vector{ConstraintRef}, variables::Vector{VariableRef})
+	function Block(model::AbstractModel, constraints::Vector{ConstraintRef}, variables::Vector{VariableRef}, residuals::Vector{VariableRef})
 		# Validate square
 		length(constraints) == length(variables) ||
 			error("Block must be square: got $(length(constraints)) constraints and $(length(variables)) variables")
@@ -84,17 +87,17 @@ struct Block
 			      "See non-unique mappings above.")
 		end
 
-		new(model, constraints, variables, variable_set)
+		new(model, constraints, variables, residuals, variable_set)
 	end
 end
 
-Block(model) = Block(model, ConstraintRef[], VariableRef[])
+Block(model) = Block(model, ConstraintRef[], VariableRef[], VariableRef[])
 
 Base.length(b::Block) = length(b.variables)
 Base.iterate(b::Block) = iterate(b.variables)
 Base.iterate(b::Block, state) = iterate(b.variables, state)
 Base.in(var::VariableRef, b::Block) = var ∈ b._variable_set
-Base.copy(b::Block) = Block(b.model, copy(b.constraints), copy(b.variables))
+Base.copy(b::Block) = Block(b.model, copy(b.constraints), copy(b.variables), copy(b.residuals))
 
 function Base.getindex(b::Block, var::VariableRef)
 	idx = findfirst(==(var), b.variables)
@@ -168,9 +171,47 @@ for v in variables(b)
 end
 ```
 
-See also: [`constraints`](@ref)
+See also: [`constraints`](@ref), [`residuals`](@ref)
 """
 variables(b::Block) = b.variables
+
+"""
+    residuals(b::Block) → Vector{VariableRef}
+
+Return the residual variables corresponding to each endogenous variables in the block.
+
+Residual variables are automatically created when defining blocks and are named
+with the suffix defined by `RESIDUAL_SUFFIX` (default "_J"). They are fixed to 0
+by default and can be used to:
+- Check for data inconsistencies (unfix residual, fix endo, solve, check residual value)
+- Temporarily disable equations (exogenize endo, endogenize residual)
+- Debug model issues
+
+# Arguments
+- `b::Block`: The block to get residuals from
+
+# Returns
+A vector of `VariableRef` objects representing the residual variables.
+The order corresponds to `variables(b)`.
+
+# Examples
+```julia
+model = Model()
+@variable(model, x)
+@variable(model, y[1:3])
+
+b = @block model begin
+    x, x == 1
+    y[i ∈ 1:3], y[i] == i
+end
+
+res = residuals(b)
+# res[1] is x_J, res[2:4] are y_J[1], y_J[2], y_J[3]
+```
+
+See also: [`variables`](@ref), [`constraints`](@ref)
+"""
+residuals(b::Block) = b.residuals
 
 """
     Base.summary(io::IO, b::Block)
@@ -305,9 +346,10 @@ end
 function Block(
 	model::AbstractModel,
 	constraints::AbstractArray{C},
-	variables::AbstractArray{V}
-) where {C<:ConstraintRef, V<:VariableRef}
-	Block(model, ConstraintRef[constraints...], VariableRef[variables...])
+	variables::AbstractArray{V},
+	residuals::AbstractArray{R}
+) where {C<:ConstraintRef, V<:VariableRef, R<:VariableRef}
+	Block(model, ConstraintRef[constraints...], VariableRef[variables...], VariableRef[residuals...])
 end
 
 function Base.:+(a::Block, b::Block)
@@ -322,7 +364,7 @@ function Base.:+(a::Block, b::Block)
 		      "This would create a non-square system with more constraints than unique variables.")
 	end
 
-	Block(a.model, vcat(a.constraints, b.constraints), vcat(a.variables, b.variables))
+	Block(a.model, vcat(a.constraints, b.constraints), vcat(a.variables, b.variables), vcat(a.residuals, b.residuals))
 end
 
 function Base.:-(a::Block, b::Block)
@@ -332,7 +374,7 @@ function Base.:-(a::Block, b::Block)
 	if !any(mask)
 		return Block(a.model)
 	end
-	Block(a.model, a.constraints[mask], a.variables[mask])
+	Block(a.model, a.constraints[mask], a.variables[mask], a.residuals[mask])
 end
 
 """
@@ -362,35 +404,77 @@ function Base.delete!(model::AbstractModel, block::Block)
   end
 end
 
-"""Helper function for Block macro"""
-pairconstraints2vars(constraints, var) = (constraints, var[axes(constraints)...])
+"""Helper function for Block macro - returns (constraints, variables, residuals) aligned by constraint indices"""
+pairconstraints2vars(constraints, var, residual) = (constraints, var[axes(constraints)...], residual[axes(constraints)...])
 
 make_constraint_name(var) = SquareModels.CONSTRAINT_PREFIX * string(var)
+make_residual_name(var) = string(var) * SquareModels.RESIDUAL_SUFFIX
 
 """Helper function to extract base name from variable reference"""
 _get_name(s::Symbol) = s
 _get_name(e::Expr) = e.args[1]
 
-"""Helper macro for Block macro"""
+"""
+Replace occurrences of `target` symbol (with optional indexing) with `(target + model[residual_sym][indices])`.
+Handles both scalar references like `x` and indexed references like `x[i,j]`.
+The `model_sym` is the symbol referring to the model, and `residual_sym` is the Symbol for the residual.
+"""
+function _substitute_with_residual(expr, target::Symbol, model_sym, residual_sym::Symbol)
+	if expr isa Symbol
+		if expr == target
+			# Scalar variable: x -> (x + model[:x_J])
+			return :($expr + $model_sym[$(QuoteNode(residual_sym))])
+		end
+		return expr
+	elseif expr isa Expr
+		if expr.head == :ref && expr.args[1] == target
+			# Indexed variable: x[i,j] -> (x[i,j] + model[:x_J][i,j])
+			indices = expr.args[2:end]
+			residual_access = Expr(:ref, :($model_sym[$(QuoteNode(residual_sym))]), indices...)
+			return :($expr + $residual_access)
+		else
+			# Recurse into sub-expressions
+			new_args = [_substitute_with_residual(arg, target, model_sym, residual_sym) for arg in expr.args]
+			return Expr(expr.head, new_args...)
+		end
+	else
+		return expr
+	end
+end
+
+"""Helper macro for Block macro - returns (constraints, variables, residuals)"""
 macro _block(model, ref_vars, constraint, extra...)
 	_error(str...) = JuMP._macro_error(:block, (model, ref_vars, constraint, extra...), __source__, str...)
 	code = Expr(:block)
 	base_sym = _get_name(ref_vars)
 	constraint_name = make_constraint_name(base_sym)
 	constraint_symbol = Symbol(constraint_name)
+	residual_name = make_residual_name(base_sym)
+	residual_symbol = Symbol(residual_name)
+
 	push!(code.args, :(unregister($model, Symbol($constraint_name))))
+	# Create residual variable with same shape as original variable (using copy_variable)
+	push!(code.args, :(SquareModels.copy_variable($residual_name, $base_sym)))
+
 	if isa(ref_vars, Symbol)
-	    macrocall = :([@constraint($model, $constraint_symbol, $constraint, $(extra...))], [$ref_vars])
+		# Scalar variable case
+		# Transform constraint: replace endo with (endo + model[:endo_J])
+		transformed_constraint = _substitute_with_residual(constraint, base_sym, model, residual_symbol)
+		macrocall = :([@constraint($model, $constraint_symbol, $transformed_constraint, $(extra...))], [$ref_vars], [$model[$(QuoteNode(residual_symbol))]])
 	elseif isexpr(ref_vars, :ref)
-	    index_vars, _ = Containers.build_ref_sets(error, ref_vars)
-	    macrocall = quote
-	        SquareModels.pairconstraints2vars(
-	            @constraint($model, $constraint_symbol[$(ref_vars.args[2:end]...)], $constraint, $(extra...)),
-	            $base_sym
-	        )
-	    end
+		index_vars, _ = Containers.build_ref_sets(error, ref_vars)
+		indices = ref_vars.args[2:end]
+		# Transform constraint: replace endo[i,j] with (endo[i,j] + model[:endo_J][i,j])
+		transformed_constraint = _substitute_with_residual(constraint, base_sym, model, residual_symbol)
+		macrocall = quote
+			SquareModels.pairconstraints2vars(
+				@constraint($model, $constraint_symbol[$(indices...)], $transformed_constraint, $(extra...)),
+				$base_sym,
+				$model[$(QuoteNode(residual_symbol))]
+			)
+		end
 	else
-	    _error("Reference must be a variable")
+		_error("Reference must be a variable")
 	end
 	push!(code.args, macrocall)
 	return esc(code)
@@ -463,11 +547,12 @@ macro block(model, expr)
 	    end
 	end
 	quote
-	    constraints, variables = Iterators.flatten.([zip($code...)...])
+	    constraints, variables, residuals = Iterators.flatten.([zip($code...)...])
 	    Block(
 	        $(esc(model)),
 	        ConstraintRef[constraints...],
 	        VariableRef[variables...],
+	        VariableRef[residuals...],
 	    )
 	end
 end
