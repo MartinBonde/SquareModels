@@ -130,9 +130,10 @@ end
 		y_exo[1:5]
 	end
 
+	# Constraints include both x/y and x_exo/y_exo so swaps are valid
 	b = @block m begin
-		x, x == 1
-		y[i ∈ 1:5], y[i] == 1
+		x, x + x_exo == 1
+		y[i ∈ 1:5], y[i] + y_exo[i] == 1
 	end
 
 	@testset "x" begin
@@ -171,9 +172,10 @@ end
 		y_exo[1:5]
 	end
 
+	# Constraints include both x/y and x_exo/y_exo so swaps are valid
 	b = @block m begin
-		x, x == 1
-		y[i ∈ 1:5], y[i] == 1
+		x, x + x_exo == 1
+		y[i ∈ 1:5], y[i] + y_exo[i] == 1
 	end
 
 	@testset "x" begin
@@ -193,9 +195,10 @@ end
 	end
 
 	@testset "x and y" begin
+		# Fresh block with both vars in constraints
 		b = @block m begin
-		x, x == 1
-		y[i ∈ 1:5], y[i] == 1
+		x, x + x_exo == 1
+		y[i ∈ 1:5], y[i] + y_exo[i] == 1
 		end
 
 		@endo_exo! b begin
@@ -231,10 +234,43 @@ end
 		end
 		@test err isa ErrorException
 		@test occursin("y is not endogenous", err.msg)
-		@test occursin("Variables in block", err.msg)
+		@test occursin("Endogenous variables in block", err.msg)
 	end
 
-	@testset "swapped order detection" begin
+	@testset "endo not in constraints" begin
+		# w doesn't appear in any constraint in b
+		@variable(m, w)
+		err = try
+			@endo_exo!(b, w, x)
+			nothing
+		catch e
+			e
+		end
+		@test err isa ErrorException
+		@test occursin("w does not appear in the block's constraints", err.msg)
+	end
+
+	@testset "swapped order suggestion" begin
+		# Create a block where swap detection makes sense: y is exogenous, x is endogenous
+		b_swap = @block m begin
+			x, x + y == 1
+		end
+		# Swapped args: trying to make x endogenous (but it already is) and y exogenous (but it's not endo)
+		err = try
+			@endo_exo!(b_swap, x, y)
+			nothing
+		catch e
+			e
+		end
+		@test err isa ErrorException
+		@test occursin("y is not endogenous", err.msg)
+		# Should suggest swap since x ∈ block and y ∈ block.variables
+		@test occursin("Did you swap the arguments?", err.msg)
+		@test occursin("@endo_exo!(block, y, x)", err.msg)
+	end
+
+	@testset "no swap suggestion when unhelpful" begin
+		# z is not in any constraint, so swapping wouldn't help
 		err = try
 			@endo_exo!(b, x, z)
 			nothing
@@ -243,8 +279,8 @@ end
 		end
 		@test err isa ErrorException
 		@test occursin("z is not endogenous", err.msg)
-		@test occursin("x is already in the block", err.msg)
-		@test occursin("Did you mean @endo_exo!(block, z, x)?", err.msg)
+		# Should NOT suggest swap since z is not in block.variables
+		@test !occursin("swap", err.msg)
 	end
 
 	@testset "length mismatch" begin

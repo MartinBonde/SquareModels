@@ -17,14 +17,19 @@ function _endo_exo!(block::Block, endos, exos, error_msg)
 	            block_vars_preview *= ", ..."
 	        end
 
-	        error_parts = ["$exo is not endogenous and cannot be used in endo-exo: $error_msg"]
-	        push!(error_parts, "  Variables in block ($(length(block.endogenous))): $block_vars_preview")
+	        error_parts = ["$exo is not endogenous and cannot be made exogenous: $error_msg"]
+	        push!(error_parts, "  Endogenous variables in block ($(length(block.endogenous))): $block_vars_preview")
 
-	        if endo ∈ block
-	            push!(error_parts, "  NOTE: $endo is already in the block. Did you mean @endo_exo!(block, $exo, $endo)?")
+	        # Only suggest swap if it would actually work
+	        if endo ∈ block && exo ∈ block.variables
+	            push!(error_parts, "  Did you swap the arguments? Try: @endo_exo!(block, $exo, $endo)")
 	        end
 
 	        error(join(error_parts, "\n"))
+	    end
+
+	    if endo ∉ block.variables
+	        error("$endo does not appear in the block's constraints and cannot be endogenized: $error_msg")
 	    end
 
 	    # Find index of exo variable and replace with endo
