@@ -330,7 +330,7 @@ end
 	end
 	@test err isa ErrorException
 	@test occursin("Cannot combine blocks", err.msg)
-	@test occursin("Overlapping variables:", err.msg)
+	@test occursin("Overlapping endogenous variables:", err.msg)
 	@test occursin("x", err.msg)
 	@test occursin("non-square", err.msg)
 
@@ -347,8 +347,8 @@ end
 		e
 	end
 	@test err2 isa ErrorException
-	@test occursin("2 variable(s)", err2.msg)
-	@test occursin("Overlapping variables:", err2.msg)
+	@test occursin("2 endogenous variable(s)", err2.msg)
+	@test occursin("Overlapping endogenous variables:", err2.msg)
 
 	# Indexed variable overlap
 	b5 = @block m begin
@@ -362,7 +362,7 @@ end
 		e
 	end
 	@test err3 isa ErrorException
-	@test occursin("2 variable(s)", err3.msg)
+	@test occursin("2 endogenous variable(s)", err3.msg)
 	@test occursin("elements", err3.msg)  # Groups show count when >1
 
 	# Large indexed variable overlap - verify error is readable
@@ -381,7 +381,7 @@ end
 		e
 	end
 	@test err4 isa ErrorException
-	@test occursin("2600 variable(s)", err4.msg)
+	@test occursin("2600 endogenous variable(s)", err4.msg)
 	@test occursin("big_var:", err4.msg)
 	@test occursin("elements", err4.msg)
 	@test occursin("e.g.,", err4.msg)
@@ -465,8 +465,8 @@ end
 	end
 
 	@test overlaps(b1, b2)  # y[2] is in both
-	@test y[2] ∈ shared_variables(b1, b2)
-	@test y[1] ∉ shared_variables(b1, b2)
+	@test y[2] ∈ shared_endogenous(b1, b2)
+	@test y[1] ∉ shared_endogenous(b1, b2)
 
 	# Test summary
 	io = IOBuffer()
@@ -486,7 +486,7 @@ end
 		empty = Block(m)
 		@test length(empty) == 0
 		@test isempty(constraints(empty))
-		@test isempty(variables(empty))
+		@test isempty(endogenous(empty))
 	end
 
 	@testset "Single equation" begin
@@ -677,6 +677,28 @@ end
 			optimize!(m)
 			@test value(m[:GDP_J]) ≈ 50 atol=1e-6
 		end
+	end
+
+	@testset "residuals(model) collects all residuals" begin
+		m = Model()
+		@variable(m, x)
+		@variable(m, y[1:3])
+		@variable(m, z)
+
+		b1 = @block m begin
+			x, x == 1
+			y[i ∈ 1:3], y[i] == i
+		end
+
+		b2 = @block m begin
+			z, z == 5
+		end
+
+		all_res = residuals(m)
+		@test length(all_res) == 5  # x_J, y_J[1:3], z_J
+		@test m[:x_J] ∈ all_res
+		@test m[:z_J] ∈ all_res
+		@test all(m[:y_J][i] ∈ all_res for i in 1:3)
 	end
 
 end

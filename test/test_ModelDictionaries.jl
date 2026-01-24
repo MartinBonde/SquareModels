@@ -244,6 +244,35 @@ end
 	@test q ∈ b
 end
 
+@testset "Test add_missing_model_variables!" begin
+	# Create a new model and dictionary
+	model2 = Model()
+	@variable(model2, a)
+	@variable(model2, b[1:3])
+
+	d = ModelDictionary(model2)
+	@test length(d) == 4  # a + b[1:3]
+
+	# Add new variables to the model
+	@variable(model2, c)
+	@variable(model2, d_var[1:2])
+
+	# New variables are not yet in dictionary
+	@test :c ∉ keys(d.dictionary)
+	@test Symbol("d_var[1]") ∉ keys(d.dictionary)
+
+	# Explicitly sync the dictionary
+	add_missing_model_variables!(d)
+
+	# Now they should be present (with nothing values)
+	@test :c ∈ keys(d.dictionary)
+	@test Symbol("d_var[1]") ∈ keys(d.dictionary)
+	@test Symbol("d_var[2]") ∈ keys(d.dictionary)
+	@test isnothing(d[c])
+	@test isnothing(d[d_var[1]])
+	@test length(d) == 7  # a + b[1:3] + c + d_var[1:2]
+end
+
 @testset "Test broadcasting" begin
 	model = Model()
 	@variable(model, x)

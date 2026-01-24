@@ -12,13 +12,13 @@ function _endo_exo!(block::Block, endos, exos, error_msg)
 
 	for (endo, exo) in zip(endos, exos)
 	    if exo ∉ block
-	        block_vars_preview = join(string.(block.variables[1:min(10, length(block.variables))]), ", ")
-	        if length(block.variables) > 10
+	        block_vars_preview = join(string.(block.endogenous[1:min(10, length(block.endogenous))]), ", ")
+	        if length(block.endogenous) > 10
 	            block_vars_preview *= ", ..."
 	        end
 
 	        error_parts = ["$exo is not endogenous and cannot be used in endo-exo: $error_msg"]
-	        push!(error_parts, "  Variables in block ($(length(block.variables))): $block_vars_preview")
+	        push!(error_parts, "  Variables in block ($(length(block.endogenous))): $block_vars_preview")
 
 	        if endo ∈ block
 	            push!(error_parts, "  NOTE: $endo is already in the block. Did you mean @endo_exo!(block, $exo, $endo)?")
@@ -28,12 +28,12 @@ function _endo_exo!(block::Block, endos, exos, error_msg)
 	    end
 
 	    # Find index of exo variable and replace with endo
-	    idx = findfirst(==(exo), block.variables)
-	    block.variables[idx] = endo
+	    idx = findfirst(==(exo), block.endogenous)
+	    block.endogenous[idx] = endo
 
 	    # Update the set
-	    delete!(block._variable_set, exo)
-	    push!(block._variable_set, endo)
+	    delete!(block._endogenous_set, exo)
+	    push!(block._endogenous_set, endo)
 	end
 end
 function _endo_exo!(block::Block, endos::AbstractVariableRef, exos::AbstractVariableRef, error_msg)

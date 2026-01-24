@@ -111,7 +111,7 @@ See also: [`fix`](@ref), [`set_start_value`](@ref), [`value_dict`](@ref)
 """
 function ModelDictionary(m)
 	md = ModelDictionary(m, Dictionary{Symbol, Union{Nothing, Number}}())
-	update!(md)
+	add_missing_model_variables!(md)
 	return md
 end
 
@@ -135,8 +135,17 @@ end
 
 Base.copy(md::ModelDictionary) = ModelDictionary(md.model, copy(md.dictionary))
 
-"""Add any missing JuMP variables to the ModelDictionary"""
-function update!(md::ModelDictionary)
+"""
+    add_missing_model_variables!(md::ModelDictionary)
+
+Add any JuMP model variables that are not yet in the dictionary.
+
+This is useful after defining new blocks (which create residual variables)
+to ensure the dictionary includes all model variables.
+
+New variables are initialized to `nothing`.
+"""
+function add_missing_model_variables!(md::ModelDictionary)
 	for v in all_variables(md.model)
 		sym = Symbol(name(v))
 		if sym ∉ keys(md.dictionary)
@@ -146,7 +155,7 @@ function update!(md::ModelDictionary)
 end
 
 function Base.setindex!(d::ModelDictionary, value, index::Symbol)
-	index ∈ keys(d.dictionary) || update!(d)
+	index ∈ keys(d.dictionary) || add_missing_model_variables!(d)
 	index ∉ keys(d.dictionary) && index ∈ keys(d.model.obj_dict) && return setindex!(d, value, d.model.obj_dict[index])
 	return setindex!(d.dictionary, value, index)
 end
@@ -156,7 +165,7 @@ Base.setindex!(d::ModelDictionary, value, index::AbstractArray) = setindex!.(Ref
 
 function Base.getindex(d::ModelDictionary, index::Symbol)
 	# If key not found, update and try again
-	index ∈ keys(d.dictionary) || update!(d)
+	index ∈ keys(d.dictionary) || add_missing_model_variables!(d)
 	index ∈ keys(d.dictionary) && return getindex(d.dictionary, index)
 	index ∈ keys(d.model.obj_dict) && return getindex(d, d.model.obj_dict[index])
 	return d.dictionary[index] # IndexError
@@ -164,7 +173,7 @@ end
 Base.getindex(d::ModelDictionary, index::AbstractVariableRef) = getindex(d, Symbol(name(index)))
 Base.getindex(d::ModelDictionary, index) = getindex(d, Symbol(index))
 function Base.getindex(d::ModelDictionary, container::AbstractArray{Symbol})
-	update!(d)
+	add_missing_model_variables!(d)
 	# Indices of the variables in the dictionary
 	idx = indexin([container...], [keys(d.dictionary)...])
 	# References to the values in the dictionary
@@ -346,20 +355,22 @@ fix(d)  # Fix all variables to their values in d
 See also: [`ModelDictionary`](@ref), [`set_start_value`](@ref), [`value_dict`](@ref)
 """
 function JuMP.fix(model::AbstractModel, d::ModelDictionary)
-	variables = filter(v -> !isnothing(d[v]), all_variables(model))
-	fix(variables, d)
+	for var in all_variables(model)
+		v = d[var]
+		isnothing(v) && error("Cannot fix variable $(name(var)): no value in dictionary. Set it explicitly (e.g., to 0) before fixing.")
+		fix(var, v, force=true)
+	end
 end
 function JuMP.fix(d::ModelDictionary)
-	vars = all_variables(d.model)
-	if length(d) == length(vars)
-		# Fast path: full dictionary, iterate over model variables directly
-		for (var, v) in zip(vars, d.dictionary.values)
-			isnothing(v) || fix(var, v, force=true)
-		end
+	n_model_vars = length(all_variables(d.model))
+	if length(d) == n_model_vars
+		# Full dictionary: require all variables to have values
+		fix(d.model, d)
 	else
-		# Slow path: subset dictionary, must look up by name
+		# Subset dictionary: only fix variables present in the dictionary
 		for (k, v) in pairs(d.dictionary)
-			isnothing(v) || fix(variable_by_name(d.model, string(k)), v, force=true)
+			isnothing(v) && error("Cannot fix variable $k: no value in dictionary. Set it explicitly (e.g., to 0) before fixing.")
+			fix(variable_by_name(d.model, string(k)), v, force=true)
 		end
 	end
 end
@@ -415,18 +426,23 @@ set_start_value(d)  # Set start values for all variables
 
 See also: [`ModelDictionary`](@ref), [`fix`](@ref), [`value_dict`](@ref)
 """
-JuMP.set_start_value(model::AbstractModel, d::ModelDictionary) = set_start_value.(all_variables(model), Ref(d))
+function JuMP.set_start_value(model::AbstractModel, d::ModelDictionary)
+	for var in all_variables(model)
+		v = d[var]
+		isnothing(v) && error("Cannot set start value for $(name(var)): no value in dictionary. Set it explicitly before calling set_start_value.")
+		set_start_value(var, v)
+	end
+end
 function JuMP.set_start_value(d::ModelDictionary)
-	vars = all_variables(d.model)
-	if length(d) == length(vars)
-		# Fast path: full dictionary
-		for (var, v) in zip(vars, d.dictionary.values)
-			isnothing(v) || set_start_value(var, v)
-		end
+	n_model_vars = length(all_variables(d.model))
+	if length(d) == n_model_vars
+		# Full dictionary: require all variables to have values
+		set_start_value(d.model, d)
 	else
-		# Slow path: subset dictionary
+		# Subset dictionary: only set start values for variables present in the dictionary
 		for (k, v) in pairs(d.dictionary)
-			isnothing(v) || set_start_value(variable_by_name(d.model, string(k)), v)
+			isnothing(v) && error("Cannot set start value for $k: no value in dictionary. Set it explicitly before calling set_start_value.")
+			set_start_value(variable_by_name(d.model, string(k)), v)
 		end
 	end
 end

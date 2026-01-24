@@ -8,8 +8,8 @@ A JuMP extension for writing modular models with square systems of equations
 module SquareModels
 
 export @block, Block, @endo_exo!, delete!
-export constraints, variables, residuals, overlaps, shared_variables
-export ModelDictionary, fix, unfix, set_start_value, value, value_dict
+export constraints, endogenous, residuals, variables, exogenous, overlaps, shared_endogenous
+export ModelDictionary, fix, unfix, set_start_value, value, value_dict, add_missing_model_variables!
 export save, load
 export RESIDUAL_SUFFIX
 
@@ -25,11 +25,38 @@ using Base.Meta: isexpr
 using StatsBase: countmap
 using Lazy
 using JuMP: JuMP, AbstractModel, AbstractVariableRef, VariableRef, ConstraintRef, Containers
+using JuMP: AffExpr, QuadExpr, NonlinearExpr
 using JuMP.Containers: DenseAxisArray
-using JuMP: @variable, @constraint
+using JuMP: @variable, @constraint, constraint_object
 using JuMP: set_name, name, variable_by_name, fix, is_fixed, unfix, all_variables, value, set_start_value
 
 include("utils.jl")
+
+"""
+    collect_variables!(vars::Set{VariableRef}, expr) → Set{VariableRef}
+
+Recursively collect all VariableRef objects from a JuMP expression.
+Works with AffExpr (linear), QuadExpr (quadratic), and NonlinearExpr (nonlinear).
+"""
+function collect_variables!(vars::Set{VariableRef}, expr)
+    if expr isa VariableRef
+        push!(vars, expr)
+    elseif expr isa AffExpr
+        union!(vars, keys(expr.terms))
+    elseif expr isa QuadExpr
+        union!(vars, keys(expr.aff.terms))
+        for (pair, _) in expr.terms
+            push!(vars, pair.a)
+            push!(vars, pair.b)
+        end
+    elseif expr isa NonlinearExpr
+        for arg in expr.args
+            collect_variables!(vars, arg)
+        end
+    end
+    return vars
+end
+collect_variables!(vars::Set{VariableRef}, ::Number) = vars
 
 """
     Block
@@ -40,15 +67,17 @@ Blocks represent "square" systems where each constraint is paired with exactly o
 variable, enabling modular model construction and endo-exo swaps (changing which
 variable is determined by which equation).
 
-Internally, constraints and variables are stored in parallel vectors where the same
-index corresponds to a constraint-variable pair. A Set is maintained for O(1) membership
-checks.
+Internally, constraints and endogenous variables are stored in parallel vectors where
+the same index corresponds to a constraint-variable pair. A Set is maintained for O(1)
+membership checks.
 
 # Fields
 - `model::AbstractModel`: The JuMP model containing the constraints and variables
 - `constraints::Vector{ConstraintRef}`: Vector of constraint references
-- `variables::Vector{VariableRef}`: Vector of endogenous variable references (parallel to constraints)
-- `_variable_set::Set{VariableRef}`: Set for O(1) membership checking
+- `endogenous::Vector{VariableRef}`: Vector of endogenous variable references (parallel to constraints)
+- `residuals::Vector{VariableRef}`: Vector of residual variable references
+- `variables::Set{VariableRef}`: All variables appearing in the block's constraints
+- `_endogenous_set::Set{VariableRef}`: Set for O(1) membership checking of endogenous variables
 
 # Examples
 ```julia
@@ -65,42 +94,43 @@ length(b)  # 4 (one scalar + three indexed)
 x ∈ b      # true
 ```
 
-See also: [`@block`](@ref), [`@endo_exo!`](@ref), [`constraints`](@ref), [`variables`](@ref)
+See also: [`@block`](@ref), [`@endo_exo!`](@ref), [`constraints`](@ref), [`endogenous`](@ref), [`variables`](@ref)
 """
 struct Block
 	model::AbstractModel
 	constraints::Vector{ConstraintRef}
-	variables::Vector{VariableRef}
+	endogenous::Vector{VariableRef}
 	residuals::Vector{VariableRef}
-	_variable_set::Set{VariableRef}
+	variables::Set{VariableRef}
+	_endogenous_set::Set{VariableRef}
 
-	function Block(model::AbstractModel, constraints::Vector{ConstraintRef}, variables::Vector{VariableRef}, residuals::Vector{VariableRef})
+	function Block(model::AbstractModel, constraints::Vector{ConstraintRef}, endogenous::Vector{VariableRef}, residuals::Vector{VariableRef}, variables::Set{VariableRef})
 		# Validate square
-		length(constraints) == length(variables) ||
-			error("Block must be square: got $(length(constraints)) constraints and $(length(variables)) variables")
+		length(constraints) == length(endogenous) ||
+			error("Block must be square: got $(length(constraints)) constraints and $(length(endogenous)) endogenous variables")
 
-		# Validate unique variables
-		variable_set = Set{VariableRef}(variables)
-		if length(variable_set) != length(variables)
-			display(non_unqiue_pairs(variables, constraints))
-			error("Non-unique mapping between variables and constraints in block definition.\n" *
+		# Validate unique endogenous variables
+		endogenous_set = Set{VariableRef}(endogenous)
+		if length(endogenous_set) != length(endogenous)
+			display(non_unqiue_pairs(endogenous, constraints))
+			error("Non-unique mapping between endogenous variables and constraints in block definition.\n" *
 			      "See non-unique mappings above.")
 		end
 
-		new(model, constraints, variables, residuals, variable_set)
+		new(model, constraints, endogenous, residuals, variables, endogenous_set)
 	end
 end
 
-Block(model) = Block(model, ConstraintRef[], VariableRef[], VariableRef[])
+Block(model) = Block(model, ConstraintRef[], VariableRef[], VariableRef[], Set{VariableRef}())
 
-Base.length(b::Block) = length(b.variables)
-Base.iterate(b::Block) = iterate(b.variables)
-Base.iterate(b::Block, state) = iterate(b.variables, state)
-Base.in(var::VariableRef, b::Block) = var ∈ b._variable_set
-Base.copy(b::Block) = Block(b.model, copy(b.constraints), copy(b.variables), copy(b.residuals))
+Base.length(b::Block) = length(b.endogenous)
+Base.iterate(b::Block) = iterate(b.endogenous)
+Base.iterate(b::Block, state) = iterate(b.endogenous, state)
+Base.in(var::VariableRef, b::Block) = var ∈ b._endogenous_set
+Base.copy(b::Block) = Block(b.model, copy(b.constraints), copy(b.endogenous), copy(b.residuals), copy(b.variables))
 
 function Base.getindex(b::Block, var::VariableRef)
-	idx = findfirst(==(var), b.variables)
+	idx = findfirst(==(var), b.endogenous)
 	isnothing(idx) && throw(KeyError(var))
 	return b.constraints[idx]
 end
@@ -108,7 +138,7 @@ end
 function Base.getindex(b::Block, c::ConstraintRef)
 	idx = findfirst(==(c), b.constraints)
 	isnothing(idx) && throw(KeyError(c))
-	return b.variables[idx]
+	return b.endogenous[idx]
 end
 
 """
@@ -121,7 +151,7 @@ Return the vector of constraint references in the block.
 
 # Returns
 A vector of `ConstraintRef` objects representing all constraints in the block.
-The order corresponds to the order of `variables(b)`.
+The order corresponds to the order of `endogenous(b)`.
 
 # Examples
 ```julia
@@ -139,17 +169,19 @@ for c in constraints(b)
 end
 ```
 
-See also: [`variables`](@ref)
+See also: [`endogenous`](@ref), [`variables`](@ref)
 """
 constraints(b::Block) = b.constraints
 
 """
-    variables(b::Block) → Vector{VariableRef}
+    endogenous(b::Block) → Vector{VariableRef}
 
 Return the vector of endogenous variable references in the block.
 
+These are the variables being solved for - each paired with a constraint.
+
 # Arguments
-- `b::Block`: The block to get variables from
+- `b::Block`: The block to get endogenous variables from
 
 # Returns
 A vector of `VariableRef` objects representing all endogenous variables in the block.
@@ -166,19 +198,19 @@ b = @block model begin
     y[i ∈ 1:3], y[i] == i
 end
 
-for v in variables(b)
+for v in endogenous(b)
     println(name(v))
 end
 ```
 
-See also: [`constraints`](@ref), [`residuals`](@ref)
+See also: [`constraints`](@ref), [`variables`](@ref), [`exogenous`](@ref)
 """
-variables(b::Block) = b.variables
+endogenous(b::Block) = b.endogenous
 
 """
     residuals(b::Block) → Vector{VariableRef}
 
-Return the residual variables corresponding to each endogenous variables in the block.
+Return the residual variables corresponding to each endogenous variable in the block.
 
 Residual variables are automatically created when defining blocks and are named
 with the suffix defined by `RESIDUAL_SUFFIX` (default "_J"). They are fixed to 0
@@ -192,7 +224,7 @@ by default and can be used to:
 
 # Returns
 A vector of `VariableRef` objects representing the residual variables.
-The order corresponds to `variables(b)`.
+The order corresponds to `endogenous(b)`.
 
 # Examples
 ```julia
@@ -209,9 +241,95 @@ res = residuals(b)
 # res[1] is x_J, res[2:4] are y_J[1], y_J[2], y_J[3]
 ```
 
-See also: [`variables`](@ref), [`constraints`](@ref)
+See also: [`endogenous`](@ref), [`constraints`](@ref), [`residuals(::AbstractModel)`](@ref)
 """
 residuals(b::Block) = b.residuals
+
+"""
+    variables(b::Block) → Set{VariableRef}
+
+Return the set of all variables that appear in the block's constraints.
+
+This includes both endogenous variables (being solved for) and exogenous variables
+(parameters to this block). Only variables that are actually used in the constraint
+expressions are included - unused indices are not present.
+
+# Arguments
+- `b::Block`: The block to get variables from
+
+# Returns
+A `Set{VariableRef}` of all variables referenced in the block's constraints.
+
+See also: [`endogenous`](@ref), [`exogenous`](@ref)
+"""
+variables(b::Block) = b.variables
+
+"""
+    exogenous(b::Block) → Set{VariableRef}
+
+Return the set of exogenous variables that appear in the block's constraints.
+
+These are variables that are referenced in the constraint expressions but are not
+endogenous (not being solved for) within this block. This set only includes
+variables that are actually used - unused variable indices are not included.
+
+# Arguments
+- `b::Block`: The block to get exogenous variables from
+
+# Returns
+A `Set{VariableRef}` of all exogenous variables referenced in the block.
+
+# Examples
+```julia
+model = Model()
+@variable(model, x)
+@variable(model, y[1:3])
+@variable(model, z[1:3])
+
+b = @block model begin
+    x, x == sum(y[i] for i in 1:3)
+    z[i ∈ 1:3], z[i] == y[i] * 2
+end
+
+exo = exogenous(b)  # Contains y[1], y[2], y[3]
+```
+
+See also: [`endogenous`](@ref), [`variables`](@ref)
+"""
+exogenous(b::Block) = setdiff(b.variables, b._endogenous_set)
+
+"""
+    residuals(model::AbstractModel) → Vector{VariableRef}
+
+Return all residual variables in the model.
+
+Residual variables are identified by their name suffix (defined by `RESIDUAL_SUFFIX`,
+default "_J"). This function collects all such variables from the model.
+
+# Arguments
+- `model::AbstractModel`: The JuMP model to search for residual variables
+
+# Returns
+A vector of `VariableRef` objects representing all residual variables in the model.
+
+# Examples
+```julia
+model = Model()
+@variable(model, x)
+@variable(model, y[1:3])
+
+b = @block model begin
+    x, x == 1
+    y[i ∈ 1:3], y[i] == i
+end
+
+res = residuals(model)
+# Returns [x_J, y_J[1], y_J[2], y_J[3]]
+```
+
+See also: [`residuals(::Block)`](@ref), [`RESIDUAL_SUFFIX`](@ref)
+"""
+residuals(model::AbstractModel) = filter(v -> endswith(base_name(v), RESIDUAL_SUFFIX), all_variables(model))
 
 """
     Base.summary(io::IO, b::Block)
@@ -276,14 +394,14 @@ end
 overlaps(b1, b2)  # true
 ```
 
-See also: [`shared_variables`](@ref), [`Block`](@ref)
+See also: [`shared_endogenous`](@ref), [`Block`](@ref)
 """
-overlaps(a::Block, b::Block) = !isempty(intersect(a._variable_set, b._variable_set))
+overlaps(a::Block, b::Block) = !isempty(intersect(a._endogenous_set, b._endogenous_set))
 
 """
-    shared_variables(a::Block, b::Block) → Vector{VariableRef}
+    shared_endogenous(a::Block, b::Block) → Vector{VariableRef}
 
-Return the variables that appear in both blocks.
+Return the endogenous variables that appear in both blocks.
 
 Useful for understanding how blocks are interconnected and for detecting
 accidental duplicate equations.
@@ -293,7 +411,7 @@ accidental duplicate equations.
 - `b::Block`: Second block
 
 # Returns
-A vector of `VariableRef` objects that appear in both blocks (may be empty)
+A vector of `VariableRef` objects that are endogenous in both blocks (may be empty)
 
 # Examples
 ```julia
@@ -310,14 +428,14 @@ b2 = @block model begin
     y[i ∈ 2:3], y[i] == i
 end
 
-shared = shared_variables(b1, b2)  # [y[2]]
+shared = shared_endogenous(b1, b2)  # [y[2]]
 y[2] ∈ shared  # true
 y[1] ∈ shared  # false
 ```
 
 See also: [`overlaps`](@ref), [`Block`](@ref)
 """
-shared_variables(a::Block, b::Block) = collect(intersect(a._variable_set, b._variable_set))
+shared_endogenous(a::Block, b::Block) = collect(intersect(a._endogenous_set, b._endogenous_set))
 
 """Format variables grouped by base name for readable error messages."""
 function format_variables(vars::AbstractVector{VariableRef})
@@ -346,10 +464,11 @@ end
 function Block(
 	model::AbstractModel,
 	constraints::AbstractArray{C},
-	variables::AbstractArray{V},
-	residuals::AbstractArray{R}
+	endogenous::AbstractArray{V},
+	residuals::AbstractArray{R},
+	variables::Set{VariableRef}=Set{VariableRef}()
 ) where {C<:ConstraintRef, V<:VariableRef, R<:VariableRef}
-	Block(model, ConstraintRef[constraints...], VariableRef[variables...], VariableRef[residuals...])
+	Block(model, ConstraintRef[constraints...], VariableRef[endogenous...], VariableRef[residuals...], variables)
 end
 
 function Base.:+(a::Block, b::Block)
@@ -357,24 +476,31 @@ function Base.:+(a::Block, b::Block)
 
 	# Check for overlap before combining
 	if overlaps(a, b)
-		shared = shared_variables(a, b)
+		shared = shared_endogenous(a, b)
 		formatted = format_variables(shared)
-		error("Cannot combine blocks: $(length(shared)) variable(s) appear in both blocks.\n" *
-		      "Overlapping variables:\n$formatted\n" *
-		      "This would create a non-square system with more constraints than unique variables.")
+		error("Cannot combine blocks: $(length(shared)) endogenous variable(s) appear in both blocks.\n" *
+		      "Overlapping endogenous variables:\n$formatted\n" *
+		      "This would create a non-square system with more constraints than unique endogenous variables.")
 	end
 
-	Block(a.model, vcat(a.constraints, b.constraints), vcat(a.variables, b.variables), vcat(a.residuals, b.residuals))
+	combined_vars = union(a.variables, b.variables)
+	Block(a.model, vcat(a.constraints, b.constraints), vcat(a.endogenous, b.endogenous), vcat(a.residuals, b.residuals), combined_vars)
 end
 
 function Base.:-(a::Block, b::Block)
 	a.model == b.model || error("Cannot subtract $b from $a. Blocks must belong to the same model.")
-	# Keep only pairs where variable is NOT in b
-	mask = [v ∉ b._variable_set for v in a.variables]
+	# Keep only pairs where endogenous variable is NOT in b
+	mask = [v ∉ b._endogenous_set for v in a.endogenous]
 	if !any(mask)
 		return Block(a.model)
 	end
-	Block(a.model, a.constraints[mask], a.variables[mask], a.residuals[mask])
+	# Re-collect variables from remaining constraints
+	remaining_cons = a.constraints[mask]
+	remaining_vars = Set{VariableRef}()
+	for c in remaining_cons
+		collect_variables!(remaining_vars, constraint_object(c).func)
+	end
+	Block(a.model, remaining_cons, a.endogenous[mask], a.residuals[mask], remaining_vars)
 end
 
 """
@@ -403,9 +529,6 @@ function Base.delete!(model::AbstractModel, block::Block)
 	JuMP.delete(model, c)
   end
 end
-
-"""Helper function for Block macro - returns (constraints, variables, residuals) aligned by constraint indices"""
-pairconstraints2vars(constraints, var, residual) = (constraints, var[axes(constraints)...], residual[axes(constraints)...])
 
 make_constraint_name(var) = SquareModels.CONSTRAINT_PREFIX * string(var)
 make_residual_name(var) = string(var) * SquareModels.RESIDUAL_SUFFIX
@@ -456,22 +579,18 @@ macro _block(model, ref_vars, constraint, extra...)
 	# Create residual variable with same shape as original variable (using copy_variable)
 	push!(code.args, :(SquareModels.copy_variable($residual_name, $base_sym)))
 
+	# Transform constraint: replace endo with (endo + model[:endo_J])
+	transformed_constraint = _substitute_with_residual(constraint, base_sym, model, residual_symbol)
+
 	if isa(ref_vars, Symbol)
 		# Scalar variable case
-		# Transform constraint: replace endo with (endo + model[:endo_J])
-		transformed_constraint = _substitute_with_residual(constraint, base_sym, model, residual_symbol)
 		macrocall = :([@constraint($model, $constraint_symbol, $transformed_constraint, $(extra...))], [$ref_vars], [$model[$(QuoteNode(residual_symbol))]])
 	elseif isexpr(ref_vars, :ref)
-		index_vars, _ = Containers.build_ref_sets(error, ref_vars)
 		indices = ref_vars.args[2:end]
-		# Transform constraint: replace endo[i,j] with (endo[i,j] + model[:endo_J][i,j])
-		transformed_constraint = _substitute_with_residual(constraint, base_sym, model, residual_symbol)
 		macrocall = quote
-			SquareModels.pairconstraints2vars(
-				@constraint($model, $constraint_symbol[$(indices...)], $transformed_constraint, $(extra...)),
-				$base_sym,
-				$model[$(QuoteNode(residual_symbol))]
-			)
+			let cons = @constraint($model, $constraint_symbol[$(indices...)], $transformed_constraint, $(extra...))
+				(cons, $base_sym[axes(cons)...], $model[$(QuoteNode(residual_symbol))][axes(cons)...])
+			end
 		end
 	else
 		_error("Reference must be a variable")
@@ -526,7 +645,7 @@ b = @block model begin
 end
 ```
 
-See also: [`Block`](@ref), [`@endo_exo!`](@ref), [`constraints`](@ref), [`variables`](@ref)
+See also: [`Block`](@ref), [`@endo_exo!`](@ref), [`constraints`](@ref), [`endogenous`](@ref), [`variables`](@ref)
 """
 macro block(model, expr)
 	line_number = expr.args[1]
@@ -547,13 +666,16 @@ macro block(model, expr)
 	    end
 	end
 	quote
-	    constraints, variables, residuals = Iterators.flatten.([zip($code...)...])
-	    Block(
-	        $(esc(model)),
-	        ConstraintRef[constraints...],
-	        VariableRef[variables...],
-	        VariableRef[residuals...],
-	    )
+	    constraints, endogenous, residuals = Iterators.flatten.([zip($code...)...])
+	    cons_vec = ConstraintRef[constraints...]
+	    endo_vec = VariableRef[endogenous...]
+	    res_vec = VariableRef[residuals...]
+	    # Collect all variables from constraint expressions
+	    all_vars = Set{VariableRef}()
+	    for c in cons_vec
+	        SquareModels.collect_variables!(all_vars, constraint_object(c).func)
+	    end
+	    Block($(esc(model)), cons_vec, endo_vec, res_vec, all_vars)
 	end
 end
 
