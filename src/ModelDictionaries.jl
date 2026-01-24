@@ -156,7 +156,7 @@ end
 
 function Base.setindex!(d::ModelDictionary, value, index::Symbol)
 	index ∈ keys(d.dictionary) || add_missing_model_variables!(d)
-	index ∉ keys(d.dictionary) && index ∈ keys(d.model.obj_dict) && return setindex!(d, value, d.model.obj_dict[index])
+	index ∉ keys(d.dictionary) && haskey(d.model, index) && return setindex!(d, value, d.model[index])
 	return setindex!(d.dictionary, value, index)
 end
 Base.setindex!(d::ModelDictionary, value, index::AbstractVariableRef) = setindex!(d, value, Symbol(name(index)))
@@ -167,7 +167,7 @@ function Base.getindex(d::ModelDictionary, index::Symbol)
 	# If key not found, update and try again
 	index ∈ keys(d.dictionary) || add_missing_model_variables!(d)
 	index ∈ keys(d.dictionary) && return getindex(d.dictionary, index)
-	index ∈ keys(d.model.obj_dict) && return getindex(d, d.model.obj_dict[index])
+	haskey(d.model, index) && return getindex(d, d.model[index])
 	return d.dictionary[index] # IndexError
 end
 Base.getindex(d::ModelDictionary, index::AbstractVariableRef) = getindex(d, Symbol(name(index)))

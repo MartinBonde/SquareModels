@@ -698,7 +698,7 @@ If a variable Symbol(new_name) does not exist, define a new variable with the sa
 function copy_variable(new_name::String, original)
 	m = first(original).model
 	sym = Symbol(new_name)
-	if sym ∉ keys(m.obj_dict)
+	if !haskey(m, sym)
 	    new = DenseAxisArray([VariableRef(m) for _ in keys(original)], axes(original)...)
 	    for (x, y) in zip(new, original)
 	        set_name(x, new_name * split_name(y)[2])
@@ -711,7 +711,7 @@ end
 function copy_variable(new_name::String, original::AbstractVariableRef)
 	m = first(original).model
 	sym = Symbol(new_name)
-	if sym ∉ keys(m.obj_dict)
+	if !haskey(m, sym)
 	    new = VariableRef(m)
 	    set_name(new, new_name)
 	    m[sym] = new
