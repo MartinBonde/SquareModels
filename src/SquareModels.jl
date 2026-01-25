@@ -7,8 +7,8 @@ A JuMP extension for writing modular models with square systems of equations
 """
 module SquareModels
 
-export @block, Block, @endo_exo!, delete!
-export constraints, endogenous, residuals, variables, exogenous, overlaps, shared_endogenous
+export @block, Block, @endo_exo!, delete!, delete_all_constraints!, add_constraints!
+export endogenous, residuals, variables, exogenous, overlaps, shared_endogenous
 export ModelDictionary, fix, unfix, set_start_value, value, value_dict, add_missing_model_variables!
 export save, load
 export RESIDUAL_SUFFIX
@@ -29,6 +29,7 @@ using JuMP: AffExpr, QuadExpr, NonlinearExpr
 using JuMP.Containers: DenseAxisArray
 using JuMP: @variable, @constraint, constraint_object
 using JuMP: set_name, name, variable_by_name, fix, is_fixed, unfix, all_variables, value, set_start_value
+using JuMP: list_of_constraint_types, all_constraints, is_valid, object_dictionary
 
 include("utils.jl")
 
@@ -59,6 +60,11 @@ end
 collect_variables!(vars::Set{VariableRef}, ::Number) = vars
 
 """
+A thunk that creates a single constraint when called. Returns nothing.
+"""
+const ConstraintThunk = Function
+
+"""
     Block
 
 A mapping between constraints and their associated endogenous variables in a JuMP model.
@@ -67,17 +73,18 @@ Blocks represent "square" systems where each constraint is paired with exactly o
 variable, enabling modular model construction and endo-exo swaps (changing which
 variable is determined by which equation).
 
-Internally, constraints and endogenous variables are stored in parallel vectors where
-the same index corresponds to a constraint-variable pair. A Set is maintained for O(1)
-membership checks.
+Blocks store constraint definitions (thunks) that allow constraints to be recreated.
+Each thunk corresponds 1:1 with an endogenous variable and creates that variable's
+constraint when called. This enables switching between different model configurations
+by deleting all constraints and re-adding only those from the active block.
 
 # Fields
 - `model::AbstractModel`: The JuMP model containing the constraints and variables
-- `constraints::Vector{ConstraintRef}`: Vector of constraint references
-- `endogenous::Vector{VariableRef}`: Vector of endogenous variable references (parallel to constraints)
+- `endogenous::Vector{VariableRef}`: Vector of endogenous variable references
 - `residuals::Vector{VariableRef}`: Vector of residual variable references
 - `variables::Set{VariableRef}`: All variables appearing in the block's constraints
 - `_endogenous_set::Set{VariableRef}`: Set for O(1) membership checking of endogenous variables
+- `_thunks::Vector{ConstraintThunk}`: Functions that recreate constraints (parallel to endogenous)
 
 # Examples
 ```julia
@@ -94,84 +101,40 @@ length(b)  # 4 (one scalar + three indexed)
 x ∈ b      # true
 ```
 
-See also: [`@block`](@ref), [`@endo_exo!`](@ref), [`constraints`](@ref), [`endogenous`](@ref), [`variables`](@ref)
+See also: [`@block`](@ref), [`@endo_exo!`](@ref), [`endogenous`](@ref), [`variables`](@ref)
 """
 struct Block
 	model::AbstractModel
-	constraints::Vector{ConstraintRef}
 	endogenous::Vector{VariableRef}
 	residuals::Vector{VariableRef}
 	variables::Set{VariableRef}
 	_endogenous_set::Set{VariableRef}
+	_thunks::Vector{ConstraintThunk}
 
-	function Block(model::AbstractModel, constraints::Vector{ConstraintRef}, endogenous::Vector{VariableRef}, residuals::Vector{VariableRef}, variables::Set{VariableRef})
-		# Validate square
-		length(constraints) == length(endogenous) ||
-			error("Block must be square: got $(length(constraints)) constraints and $(length(endogenous)) endogenous variables")
+	function Block(model::AbstractModel, endogenous::Vector{VariableRef}, residuals::Vector{VariableRef}, variables::Set{VariableRef}, thunks::Vector{ConstraintThunk})
+		# Validate square: thunks must match endogenous 1:1
+		length(thunks) == length(endogenous) ||
+			error("Block must be square: got $(length(thunks)) thunks and $(length(endogenous)) endogenous variables")
 
 		# Validate unique endogenous variables
 		endogenous_set = Set{VariableRef}(endogenous)
 		if length(endogenous_set) != length(endogenous)
-			display(non_unqiue_pairs(endogenous, constraints))
+			display(non_unqiue_pairs(endogenous, thunks))
 			error("Non-unique mapping between endogenous variables and constraints in block definition.\n" *
 			      "See non-unique mappings above.")
 		end
 
-		new(model, constraints, endogenous, residuals, variables, endogenous_set)
+		new(model, endogenous, residuals, variables, endogenous_set, thunks)
 	end
 end
 
-Block(model) = Block(model, ConstraintRef[], VariableRef[], VariableRef[], Set{VariableRef}())
+Block(model) = Block(model, VariableRef[], VariableRef[], Set{VariableRef}(), ConstraintThunk[])
 
 Base.length(b::Block) = length(b.endogenous)
 Base.iterate(b::Block) = iterate(b.endogenous)
 Base.iterate(b::Block, state) = iterate(b.endogenous, state)
 Base.in(var::VariableRef, b::Block) = var ∈ b._endogenous_set
-Base.copy(b::Block) = Block(b.model, copy(b.constraints), copy(b.endogenous), copy(b.residuals), copy(b.variables))
-
-function Base.getindex(b::Block, var::VariableRef)
-	idx = findfirst(==(var), b.endogenous)
-	isnothing(idx) && throw(KeyError(var))
-	return b.constraints[idx]
-end
-
-function Base.getindex(b::Block, c::ConstraintRef)
-	idx = findfirst(==(c), b.constraints)
-	isnothing(idx) && throw(KeyError(c))
-	return b.endogenous[idx]
-end
-
-"""
-    constraints(b::Block) → Vector{ConstraintRef}
-
-Return the vector of constraint references in the block.
-
-# Arguments
-- `b::Block`: The block to get constraints from
-
-# Returns
-A vector of `ConstraintRef` objects representing all constraints in the block.
-The order corresponds to the order of `endogenous(b)`.
-
-# Examples
-```julia
-model = Model()
-@variable(model, x)
-@variable(model, y[1:3])
-
-b = @block model begin
-    x, x == 1
-    y[i ∈ 1:3], y[i] == i
-end
-
-for c in constraints(b)
-    println(name(c))
-end
-```
-
-See also: [`endogenous`](@ref), [`variables`](@ref)
-"""
-constraints(b::Block) = b.constraints
+Base.copy(b::Block) = Block(b.model, copy(b.endogenous), copy(b.residuals), copy(b.variables), copy(b._thunks))
 
 """
     endogenous(b::Block) → Vector{VariableRef}
@@ -185,7 +148,7 @@ These are the variables being solved for - each paired with a constraint.
 
 # Returns
 A vector of `VariableRef` objects representing all endogenous variables in the block.
-The order corresponds to the order of `constraints(b)`.
+The order corresponds to the order in which constraints were defined.
 
 # Examples
 ```julia
@@ -463,12 +426,12 @@ end
 
 function Block(
 	model::AbstractModel,
-	constraints::AbstractArray{C},
 	endogenous::AbstractArray{V},
 	residuals::AbstractArray{R},
-	variables::Set{VariableRef}=Set{VariableRef}()
-) where {C<:ConstraintRef, V<:VariableRef, R<:VariableRef}
-	Block(model, ConstraintRef[constraints...], VariableRef[endogenous...], VariableRef[residuals...], variables)
+	variables::Set{VariableRef},
+	thunks::Vector{ConstraintThunk}
+) where {V<:VariableRef, R<:VariableRef}
+	Block(model, VariableRef[endogenous...], VariableRef[residuals...], variables, thunks)
 end
 
 function Base.:+(a::Block, b::Block)
@@ -484,7 +447,8 @@ function Base.:+(a::Block, b::Block)
 	end
 
 	combined_vars = union(a.variables, b.variables)
-	Block(a.model, vcat(a.constraints, b.constraints), vcat(a.endogenous, b.endogenous), vcat(a.residuals, b.residuals), combined_vars)
+	combined_thunks = vcat(a._thunks, b._thunks)
+	Block(a.model, vcat(a.endogenous, b.endogenous), vcat(a.residuals, b.residuals), combined_vars, combined_thunks)
 end
 
 function Base.:-(a::Block, b::Block)
@@ -494,19 +458,14 @@ function Base.:-(a::Block, b::Block)
 	if !any(mask)
 		return Block(a.model)
 	end
-	# Re-collect variables from remaining constraints
-	remaining_cons = a.constraints[mask]
-	remaining_vars = Set{VariableRef}()
-	for c in remaining_cons
-		collect_variables!(remaining_vars, constraint_object(c).func)
-	end
-	Block(a.model, remaining_cons, a.endogenous[mask], a.residuals[mask], remaining_vars)
+	# Filter thunks using the same mask (thunks are parallel to endogenous)
+	Block(a.model, a.endogenous[mask], a.residuals[mask], Set{VariableRef}(), a._thunks[mask])
 end
 
 """
     delete!(model::AbstractModel, block::Block)
 
-Delete all constraints in a block from the model.
+Delete all constraints in a block from the model by looking up constraint names.
 
 # Arguments
 - `model::AbstractModel`: The JuMP model containing the constraints
@@ -525,9 +484,107 @@ delete!(model, b)  # Removes the constraint from the model
 ```
 """
 function Base.delete!(model::AbstractModel, block::Block)
-  for c in constraints(block)
-	JuMP.delete(model, c)
-  end
+	# Delete constraints by looking up their names based on endogenous variables
+	for var in block.endogenous
+		constraint_sym = Symbol(make_constraint_name(base_name(var)))
+		if haskey(model, constraint_sym)
+			obj = model[constraint_sym]
+			if obj isa ConstraintRef
+				JuMP.delete(model, obj)
+			elseif obj isa AbstractArray
+				for c in obj
+					if is_valid(model, c)
+						JuMP.delete(model, c)
+					end
+				end
+			end
+			JuMP.unregister(model, constraint_sym)
+		end
+	end
+end
+
+"""
+    delete_all_constraints!(model::AbstractModel)
+
+Delete all constraints from a model and unregister their names.
+
+This removes all constraints (excluding variable bounds) from the model and cleans up
+their registered names from the model's object dictionary.
+
+# Arguments
+- `model::AbstractModel`: The JuMP model to remove constraints from
+
+# Examples
+```julia
+model = Model()
+@variable(model, x)
+
+b = @block model begin
+    x, x == 1
+end
+
+delete_all_constraints!(model)  # Removes all constraints and unregisters names
+```
+"""
+function delete_all_constraints!(model::AbstractModel)
+	# Collect all constraint names to unregister
+	names_to_unregister = Symbol[]
+	for (sym, obj) in object_dictionary(model)
+		if obj isa ConstraintRef || (obj isa AbstractArray && eltype(obj) <: ConstraintRef)
+			push!(names_to_unregister, sym)
+		end
+	end
+
+	# Delete all constraints (excluding variable-in-set constraints like bounds)
+	for c in all_constraints(model; include_variable_in_set_constraints=false)
+		JuMP.delete(model, c)
+	end
+
+	# Unregister constraint names
+	for sym in names_to_unregister
+		JuMP.unregister(model, sym)
+	end
+
+	return nothing
+end
+
+"""
+    add_constraints!(block::Block)
+
+Add all constraints from a block to the model using stored constraint definitions.
+
+This function uses the constraint thunks stored in the block to recreate all constraints.
+The block itself is not modified.
+
+# Arguments
+- `block::Block`: The block whose constraints should be added to the model
+
+# Examples
+```julia
+model = Model()
+@variable(model, x)
+
+b = @block model begin
+    x, x == 1
+end
+
+delete_all_constraints!(model)  # Remove all constraints
+add_constraints!(b)             # Re-add this block's constraints
+```
+
+See also: [`delete_all_constraints!`](@ref), [`@block`](@ref)
+"""
+function add_constraints!(block::Block)
+	# Use a Set to deduplicate thunks (indexed constraints share the same thunk)
+	called = Set{UInt}()
+	for thunk in block._thunks
+		id = objectid(thunk)
+		if id ∉ called
+			push!(called, id)
+			thunk()
+		end
+	end
+	return nothing
 end
 
 make_constraint_name(var) = SquareModels.CONSTRAINT_PREFIX * string(var)
@@ -565,7 +622,7 @@ function _substitute_with_residual(expr, target::Symbol, model_sym, residual_sym
 	end
 end
 
-"""Helper macro for Block macro - returns (constraints, variables, residuals)"""
+"""Helper macro for Block macro - returns (endogenous, residuals, thunks) where thunks is a vector parallel to endogenous"""
 macro _block(model, ref_vars, constraint, extra...)
 	_error(str...) = JuMP._macro_error(:block, (model, ref_vars, constraint, extra...), __source__, str...)
 	code = Expr(:block)
@@ -583,13 +640,33 @@ macro _block(model, ref_vars, constraint, extra...)
 	transformed_constraint = _substitute_with_residual(constraint, base_sym, model, residual_symbol)
 
 	if isa(ref_vars, Symbol)
-		# Scalar variable case
-		macrocall = :([@constraint($model, $constraint_symbol, $transformed_constraint, $(extra...))], [$ref_vars], [$model[$(QuoteNode(residual_symbol))]])
+		# Scalar variable case - single thunk
+		macrocall = quote
+			let cons = @constraint($model, $constraint_symbol, $transformed_constraint, $(extra...))
+				endo = $ref_vars
+				resid = $model[$(QuoteNode(residual_symbol))]
+				# Create thunk that can recreate this single constraint
+				thunk = () -> begin
+					unregister($model, Symbol($constraint_name))
+					@constraint($model, $constraint_symbol, $transformed_constraint, $(extra...))
+				end
+				([endo], [resid], SquareModels.ConstraintThunk[thunk])
+			end
+		end
 	elseif isexpr(ref_vars, :ref)
 		indices = ref_vars.args[2:end]
 		macrocall = quote
 			let cons = @constraint($model, $constraint_symbol[$(indices...)], $transformed_constraint, $(extra...))
-				(cons, $base_sym[axes(cons)...], $model[$(QuoteNode(residual_symbol))][axes(cons)...])
+				endos = [$base_sym[axes(cons)...]...]
+				resids = [$model[$(QuoteNode(residual_symbol))][axes(cons)...]...]
+				# Create a shared thunk that recreates all constraints in this group
+				shared_thunk = () -> begin
+					unregister($model, Symbol($constraint_name))
+					@constraint($model, $constraint_symbol[$(indices...)], $transformed_constraint, $(extra...))
+				end
+				# Each endogenous variable gets the same thunk reference
+				thunks = SquareModels.ConstraintThunk[shared_thunk for _ in endos]
+				(endos, resids, thunks)
 			end
 		end
 	else
@@ -666,16 +743,29 @@ macro block(model, expr)
 	    end
 	end
 	quote
-	    constraints, endogenous, residuals = Iterators.flatten.([zip($code...)...])
-	    cons_vec = ConstraintRef[constraints...]
+	    results = [$code...]
+	    endogenous = Iterators.flatten([r[1] for r in results])
+	    residuals = Iterators.flatten([r[2] for r in results])
+	    thunks = Iterators.flatten([r[3] for r in results])
 	    endo_vec = VariableRef[endogenous...]
 	    res_vec = VariableRef[residuals...]
-	    # Collect all variables from constraint expressions
+	    thunks_vec = SquareModels.ConstraintThunk[thunks...]
+	    # Collect all variables from constraints currently in model
 	    all_vars = Set{VariableRef}()
-	    for c in cons_vec
-	        SquareModels.collect_variables!(all_vars, constraint_object(c).func)
+	    for v in endo_vec
+	        constraint_sym = Symbol(SquareModels.make_constraint_name(SquareModels.base_name(v)))
+	        if haskey($(esc(model)), constraint_sym)
+	            obj = $(esc(model))[constraint_sym]
+	            if obj isa ConstraintRef
+	                SquareModels.collect_variables!(all_vars, constraint_object(obj).func)
+	            elseif obj isa AbstractArray
+	                for c in obj
+	                    SquareModels.collect_variables!(all_vars, constraint_object(c).func)
+	                end
+	            end
+	        end
 	    end
-	    Block($(esc(model)), cons_vec, endo_vec, res_vec, all_vars)
+	    Block($(esc(model)), endo_vec, res_vec, all_vars, thunks_vec)
 	end
 end
 
