@@ -371,7 +371,7 @@ end
 	@test length(subset) == 2
 end
 
-@testset "Test save and load" begin
+@testset "Test unload and load" begin
 	mktempdir() do tmpdir
 		model = Model()
 		@variable(model, x)
@@ -387,7 +387,7 @@ end
 
 		# Save and load
 		path = joinpath(tmpdir, "test.parquet")
-		save(path, d)
+		unload(path, d)
 		@test isfile(path)
 
 		d2 = load(path, model)
@@ -425,7 +425,7 @@ end
 	@test parse_variable_name("emissions[energy,dk,2025,coal]") == ("emissions", "energy,dk,2025,coal")
 end
 
-@testset "Test save skips nothing values" begin
+@testset "Test unload skips nothing values" begin
 	mktempdir() do tmpdir
 		model = Model()
 		@variable(model, x)
@@ -436,7 +436,7 @@ end
 		# y values are left as nothing
 
 		path = joinpath(tmpdir, "test.parquet")
-		save(path, d)
+		unload(path, d)
 
 		d2 = load(path, model)
 		@test d2[x] == 1.0

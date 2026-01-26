@@ -505,7 +505,7 @@ function parse_variable_name(name::String)
 end
 
 """
-    save(path::AbstractString, d::ModelDictionary)
+    unload(path::AbstractString, d::ModelDictionary)
 
 Save a ModelDictionary to a Parquet file.
 
@@ -521,12 +521,12 @@ The dictionary is stored as a table with columns:
 # Examples
 ```julia
 d = value_dict(model)
-save("solution.parquet", d)
+unload("solution.parquet", d)
 ```
 
 See also: [`load`](@ref), [`ModelDictionary`](@ref)
 """
-function save(path::AbstractString, d::ModelDictionary)
+function unload(path::AbstractString, d::ModelDictionary)
 	rows = NamedTuple{(:variable, :indices, :value), Tuple{String, String, Float64}}[]
 	for (k, v) in pairs(d.dictionary)
 		isnothing(v) && continue
@@ -582,7 +582,7 @@ d = load("data.gdx", model;
 )
 ```
 
-See also: [`save`](@ref), [`ModelDictionary`](@ref)
+See also: [`unload`](@ref), [`ModelDictionary`](@ref)
 """
 function load(path::AbstractString, model::AbstractModel, renames::Pair...; kwargs...)
 	rename_dict, slice_dict = _build_rename_and_slice_dicts(renames, kwargs)

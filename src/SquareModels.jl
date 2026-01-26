@@ -10,7 +10,7 @@ module SquareModels
 export @block, Block, @endo_exo!
 export endogenous, residuals, variables, exogenous, overlaps, shared_endogenous
 export ModelDictionary, fix, unfix, set_start_value, value, value_dict, add_missing_model_variables!
-export save, load
+export unload, load
 export RESIDUAL_SUFFIX
 export solve, solve!
 
