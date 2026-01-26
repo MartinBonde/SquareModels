@@ -840,4 +840,33 @@ end
 	@test all(isa.(b._thunks, Function))
 end
 
+@testset "@block performance" begin
+	# Test that @block scales linearly with problem size, not quadratically
+	# A 100x100 indexed variable creates 10,000 constraints
+	# With the O(n²) bug, this would iterate 100M times; with the fix, only 10K
+	m = Model()
+	N = 100
+	@variable(m, large[1:N, 1:N])
+	@variable(m, param[1:N, 1:N])
+
+	# Warm-up compilation run with smaller size
+	m_warmup = Model()
+	@variable(m_warmup, w[1:5, 1:5])
+	@variable(m_warmup, wp[1:5, 1:5])
+	@block m_warmup begin
+		w[i ∈ 1:5, j ∈ 1:5], w[i,j] == wp[i,j]
+	end
+
+	# Time the actual test - should complete in under 5 seconds with the fix
+	# (would take minutes with O(n²) behavior)
+	t = @elapsed begin
+		b = @block m begin
+			large[i ∈ 1:N, j ∈ 1:N], large[i,j] == param[i,j] * 2
+		end
+	end
+
+	@test length(b) == N * N
+	@test t < 5.0  # Should be well under 1 second, but allow margin for CI
+end
+
 end # Module

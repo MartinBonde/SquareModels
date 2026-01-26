@@ -751,9 +751,13 @@ macro block(model, expr)
 	    res_vec = VariableRef[residuals...]
 	    thunks_vec = SquareModels.ConstraintThunk[thunks...]
 	    # Collect all variables from constraints currently in model
+	    # Process each unique constraint symbol only once
 	    all_vars = Set{VariableRef}()
+	    seen_constraints = Set{Symbol}()
 	    for v in endo_vec
 	        constraint_sym = Symbol(SquareModels.make_constraint_name(SquareModels.base_name(v)))
+	        constraint_sym ∈ seen_constraints && continue
+	        push!(seen_constraints, constraint_sym)
 	        if haskey($(esc(model)), constraint_sym)
 	            obj = $(esc(model))[constraint_sym]
 	            if obj isa ConstraintRef
