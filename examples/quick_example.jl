@@ -7,18 +7,12 @@
 
 using JuMP
 using SquareModels
-
-# ------------------------------------------------------------------------------
-# Initialize a new model and choose solver
-# ------------------------------------------------------------------------------
 using Ipopt
+
+# ------------------------------------------------------------------------------
+# Model and solver
+# ------------------------------------------------------------------------------
 model = Model(Ipopt.Optimizer)
-
-# For large-scale models, use GAMS with CONOPT:
-# using GAMS
-# model = Model(GAMS.Optimizer)
-
-set_silent(model)
 
 # ------------------------------------------------------------------------------
 # Sets
@@ -36,9 +30,10 @@ j = 1:2  # Types of labor
     p     # Price
 
     N[j]  # Labor force (exogenous)
-    ρ[j]  # Productivity (exogenous)
-    μ[j]  # Scale parameter (calibrated)
     σ     # Substitution elasticity (exogenous)
+
+    ρ[j]  # Productivity (calibrated)
+    μ[j]  # Scale parameter (calibrated)
 end
 
 # ------------------------------------------------------------------------------
@@ -54,39 +49,40 @@ model_block = @block model begin
 end
 
 # ------------------------------------------------------------------------------
+# Exogenous values
+# ------------------------------------------------------------------------------
+data = ModelDictionary(model)
+
+data[σ] = 2.0
+data[w] .= 1
+data[N] = [3200, 500]
+data[L] = [800, 200]
+
+# Set residual values
+data[residuals(model_block)] .= 0.0
+
+# ------------------------------------------------------------------------------
 # Calibration
 # ------------------------------------------------------------------------------
-# Fix variables that we have data for
-fix(σ, 2)
-fix(Y, 1000)
-fix.(N, [3200, 500])
-fix.(L, [800, 200])
+# For calibration, swap observed values with parameters to be calibrated
+calibration = copy(model_block)
+@endo_exo! calibration begin
+    μ, L
+    ρ, w
+end
 
-# Provide starting guesses to help the solver
-set_start_value.(model_block, 1.0)
+start_values = copy(data)
+start_values[endogenous(calibration)] .= 1.0
 
-# Solve calibration model
-optimize!(model)
-
-# Save all results as a Dictionary
-baseline = value_dict(model)
+baseline = solve(calibration, data; start_values)
 
 # ------------------------------------------------------------------------------
 # Counterfactual scenario
 # ------------------------------------------------------------------------------
-# Fix all variables to their baseline values
-fix(baseline)
-
-# Unfix endogenous variables (variables attached to our block of equations)
-unfix(model_block)
-
-# Shock the population
-fix.(N, [2700, 1000])
-
-# Solve model using baseline as starting guesses
-set_start_value(baseline)
-optimize!(model)
-shock = value_dict(model)
+# Start from baseline and apply shock
+shock = copy(baseline)
+shock[N] .= [2700.0, 1000.0]
+solve!(model_block, shock)
 
 # ------------------------------------------------------------------------------
 # Results

@@ -31,37 +31,37 @@ end
 	end
 
 	@testset "x" begin
-		v1, r1, thunks1 = SquareModels.@_block(m, x, x == 1)
-		b1 = SquareModels.Block(m, v1, r1, Set{VariableRef}(), thunks1)
+		v1, r1, cons1 = SquareModels.@_block(m, x, x == 1)
+		b1 = SquareModels.Block(m, v1, r1, Set{VariableRef}(), cons1)
 		@test typeof(v1) <: AbstractVector{VariableRef}
-		@test typeof(thunks1) <: AbstractVector{SquareModels.ConstraintThunk}
-		@test length(v1) == length(thunks1) == length(b1) == 1
+		@test typeof(cons1) <: AbstractVector{ConstraintRef}
+		@test length(v1) == length(cons1) == length(b1) == 1
 		@test x ∈ b1
 	end
 
 	@testset "y[1:4]" begin
-		v2, r2, thunks2 = SquareModels.@_block(m, y[i ∈ 1:4], y[i] == 1)
-		b2 = SquareModels.Block(m, v2, r2, Set{VariableRef}(), thunks2)
+		v2, r2, cons2 = SquareModels.@_block(m, y[i ∈ 1:4], y[i] == 1)
+		b2 = SquareModels.Block(m, v2, r2, Set{VariableRef}(), cons2)
 		@test typeof(v2) <: AbstractVector{VariableRef}
-		@test length(v2) == length(thunks2) == length(b2) == 4
+		@test length(v2) == length(cons2) == length(b2) == 4
 		@test all(y[i] ∈ b2 for i ∈ 1:4)
 	end
 
 	@testset "y[5]" begin
-		v3, r3, thunks3 = SquareModels.@_block(m, y[i ∈ [5]], y[i] == 1)
-		b3 = SquareModels.Block(m, v3, r3, Set{VariableRef}(), thunks3)
+		v3, r3, cons3 = SquareModels.@_block(m, y[i ∈ [5]], y[i] == 1)
+		b3 = SquareModels.Block(m, v3, r3, Set{VariableRef}(), cons3)
 		@test typeof(v3) <: AbstractVector{VariableRef}
-		@test length(v3) == length(thunks3) == length(b3) == 1
+		@test length(v3) == length(cons3) == length(b3) == 1
 		@test y[5] ∈ b3
 	end
 
 	@testset "z" begin
 		t₁ = 1
 		T = 3
-		v4, r4, thunks4 = SquareModels.@_block(m, z[i ∈ t₁:T, j ∈ [:a, :b]], z[i, j] == 1)
-		b4 = SquareModels.Block(m, v4, r4, Set{VariableRef}(), thunks4)
+		v4, r4, cons4 = SquareModels.@_block(m, z[i ∈ t₁:T, j ∈ [:a, :b]], z[i, j] == 1)
+		b4 = SquareModels.Block(m, v4, r4, Set{VariableRef}(), cons4)
 		@test typeof(v4) <: AbstractVector{VariableRef}
-		@test length(v4) == length(thunks4) == length(b4) == 6
+		@test length(v4) == length(cons4) == length(b4) == 6
 		@test all(z[i, j] ∈ b4 for i ∈ t₁:T, j ∈ [:a, :b])
 	end
 end
@@ -434,12 +434,12 @@ end
 		τ[D,S] # Trade cost from country s to country d
   end
 
-  variable, residual, thunks = SquareModels.@_block(m, C[d ∈ D], w[d] * y[d] == pᶜ[d] * C[d])
+  variable, residual, cons = SquareModels.@_block(m, C[d ∈ D], w[d] * y[d] == pᶜ[d] * C[d])
   @test isa(variable, AbstractVector{VariableRef})
-  @test isa(thunks, AbstractVector{SquareModels.ConstraintThunk})
-  variable, residual, thunks = SquareModels.@_block(m, c[d ∈ D, s ∈ S], c[d,s] == μ[d,s] * C[d] * (w[s] / pᶜ[d])^(-σ))
+  @test isa(cons, AbstractVector{ConstraintRef})
+  variable, residual, cons = SquareModels.@_block(m, c[d ∈ D, s ∈ S], c[d,s] == μ[d,s] * C[d] * (w[s] / pᶜ[d])^(-σ))
   @test isa(variable, AbstractVector{VariableRef})
-  @test isa(thunks, AbstractVector{SquareModels.ConstraintThunk})
+  @test isa(cons, AbstractVector{ConstraintRef})
 
   ert_tuples = [
 		SquareModels.@_block(m, C[d ∈ D], w[d] * y[d] == pᶜ[d] * C[d]),
@@ -451,11 +451,11 @@ end
   ]
   variables = VariableRef[Iterators.flatten([t[1] for t in ert_tuples])...]
   residuals = VariableRef[Iterators.flatten([t[2] for t in ert_tuples])...]
-  thunks = SquareModels.ConstraintThunk[Iterators.flatten([t[3] for t in ert_tuples])...]
+  constraints = ConstraintRef[Iterators.flatten([t[3] for t in ert_tuples])...]
   @test all(isa.(variables, VariableRef))
-  @test all(isa.(thunks, Function))
+  @test all(isa.(constraints, ConstraintRef))
 
-  Block(m, variables, residuals, Set{VariableRef}(), thunks)
+  Block(m, variables, residuals, Set{VariableRef}(), constraints)
 
   base_model = @block m begin
 		C[d ∈ D],
@@ -732,7 +732,7 @@ end
 
 end
 
-@testset "delete_all_constraints!" begin
+@testset "constraint refs are stored" begin
 	m = Model()
 	@variable(m, x)
 	@variable(m, y[1:3])
@@ -742,102 +742,11 @@ end
 		y[i ∈ 1:3], y[i] == i
 	end
 
-	# Verify constraints exist
-	@test JuMP.num_constraints(m; count_variable_in_set_constraints=false) == 4
-
-	# Delete all constraints
-	delete_all_constraints!(m)
-
-	# Verify constraints are gone
-	@test JuMP.num_constraints(m; count_variable_in_set_constraints=false) == 0
-
-	# Verify constraint names are unregistered
-	@test !haskey(m, :E_x)
-	@test !haskey(m, :E_y)
-end
-
-@testset "add_constraints!" begin
-	m = Model(Ipopt.Optimizer)
-	@variable(m, x)
-	@variable(m, y[1:3])
-
-	b = @block m begin
-		x, x == 1
-		y[i ∈ 1:3], y[i] == i
-	end
-
-	# Verify constraints exist initially
-	@test JuMP.num_constraints(m; count_variable_in_set_constraints=false) == 4
-
-	# Delete all constraints
-	delete_all_constraints!(m)
-	@test JuMP.num_constraints(m; count_variable_in_set_constraints=false) == 0
-
-	# Re-add constraints from block
-	add_constraints!(b)
-	@test JuMP.num_constraints(m; count_variable_in_set_constraints=false) == 4
-
-	# Verify the model still solves correctly
-	optimize!(m)
-	@test value(x) ≈ 1 atol=1e-6
-	@test all(value(y[i]) ≈ i for i in 1:3)
-end
-
-@testset "switch between blocks" begin
-	m = Model(Ipopt.Optimizer)
-	@variable(m, x)
-	@variable(m, y)
-
-	# Two different blocks with different equations for x
-	b1 = @block m begin
-		x, x == 1
-		y, y == 2
-	end
-
-	# Delete all constraints (b1's constraints are now added)
-	delete_all_constraints!(m)
-
-	# Define a new block (which adds its constraints)
-	b2 = @block m begin
-		x, x == 10
-		y, y == 20
-	end
-
-	# Solve with b2's constraints
-	optimize!(m)
-	@test value(x) ≈ 10 atol=1e-6
-	@test value(y) ≈ 20 atol=1e-6
-
-	# Switch back to b1's constraints
-	delete_all_constraints!(m)
-	add_constraints!(b1)
-
-	optimize!(m)
-	@test value(x) ≈ 1 atol=1e-6
-	@test value(y) ≈ 2 atol=1e-6
-
-	# Switch to b2 again
-	delete_all_constraints!(m)
-	add_constraints!(b2)
-
-	optimize!(m)
-	@test value(x) ≈ 10 atol=1e-6
-	@test value(y) ≈ 20 atol=1e-6
-end
-
-@testset "constraint thunks are stored" begin
-	m = Model()
-	@variable(m, x)
-	@variable(m, y[1:3])
-
-	b = @block m begin
-		x, x == 1
-		y[i ∈ 1:3], y[i] == i
-	end
-
-	# Verify thunks are stored - one per endogenous variable (4 total: 1 for x + 3 for y)
-	@test length(b._thunks) == 4
-	@test all(isa.(b._thunks, Function))
+	# Verify constraints are stored - one per endogenous variable (4 total: 1 for x + 3 for y)
+	@test length(b.constraints) == 4
+	@test all(isa.(b.constraints, ConstraintRef))
+	# Names can be retrieved directly from constraints
+	@test name(b.constraints[1]) == "E_x"
 end
 
 @testset "@block performance" begin

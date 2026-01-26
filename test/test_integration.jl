@@ -167,7 +167,6 @@ end
     include(joinpath(@__DIR__, "..", "examples", "quick_example.jl"))
 
     # After include, variables are in scope. Verify results.
-    @test termination_status(model) in [LOCALLY_SOLVED, OPTIMAL]
     @test baseline isa ModelDictionary
     @test shock isa ModelDictionary
     @test shock[Y] > baseline[Y]  # Output should increase with population shock
