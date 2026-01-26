@@ -209,9 +209,9 @@ See also: [`endogenous`](@ref), [`constraints`](@ref), [`residuals(::AbstractMod
 residuals(b::Block) = b.residuals
 
 """
-    variables(b::Block) → Set{VariableRef}
+    variables(b::Block) → Vector{VariableRef}
 
-Return the set of all variables that appear in the block's constraints.
+Return a vector of all variables that appear in the block's constraints.
 
 This includes both endogenous variables (being solved for) and exogenous variables
 (parameters to this block). Only variables that are actually used in the constraint
@@ -221,26 +221,26 @@ expressions are included - unused indices are not present.
 - `b::Block`: The block to get variables from
 
 # Returns
-A `Set{VariableRef}` of all variables referenced in the block's constraints.
+A `Vector{VariableRef}` of all variables referenced in the block's constraints.
 
 See also: [`endogenous`](@ref), [`exogenous`](@ref)
 """
-variables(b::Block) = b.variables
+variables(b::Block) = collect(b.variables)
 
 """
-    exogenous(b::Block) → Set{VariableRef}
+    exogenous(b::Block) → Vector{VariableRef}
 
-Return the set of exogenous variables that appear in the block's constraints.
+Return a vector of exogenous variables that appear in the block's constraints.
 
 These are variables that are referenced in the constraint expressions but are not
-endogenous (not being solved for) within this block. This set only includes
-variables that are actually used - unused variable indices are not included.
+endogenous (not being solved for) within this block. Only variables that are
+actually used are included - unused variable indices are not present.
 
 # Arguments
 - `b::Block`: The block to get exogenous variables from
 
 # Returns
-A `Set{VariableRef}` of all exogenous variables referenced in the block.
+A `Vector{VariableRef}` of all exogenous variables referenced in the block.
 
 # Examples
 ```julia
@@ -259,7 +259,7 @@ exo = exogenous(b)  # Contains y[1], y[2], y[3]
 
 See also: [`endogenous`](@ref), [`variables`](@ref)
 """
-exogenous(b::Block) = setdiff(b.variables, b._endogenous_set)
+exogenous(b::Block) = collect(setdiff(b.variables, b._endogenous_set))
 
 """
     residuals(model::AbstractModel) → Vector{VariableRef}
