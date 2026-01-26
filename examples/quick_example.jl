@@ -11,8 +11,8 @@ using SquareModels
 # ------------------------------------------------------------------------------
 # Initialize a new model and choose solver
 # ------------------------------------------------------------------------------
-using UnoSolver
-model = Model(UnoSolver.Optimizer)
+using Ipopt
+model = Model(Ipopt.Optimizer)
 
 # For large-scale models, use GAMS with CONOPT:
 # using GAMS

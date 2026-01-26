@@ -4,7 +4,7 @@ using Test
 using JuMP
 using SquareModels
 using JuMP.Containers: DenseAxisArray
-using UnoSolver
+using Ipopt
 
 @testset "copy_variable" begin
 	m = Model()
@@ -67,7 +67,7 @@ end
 end
 
 @testset "@block" begin
-	m = Model(UnoSolver.Optimizer)
+	m = Model(Ipopt.Optimizer)
 	@variables m begin
 		x
 		y[1:5]
@@ -94,7 +94,7 @@ end
 end
 
 @testset "solve block" begin
-	m = Model(UnoSolver.Optimizer)
+	m = Model(Ipopt.Optimizer)
 	@variables m begin
 		x
 		y[1:5]
@@ -114,7 +114,7 @@ end
 end
 
 @testset "_endo_exo!" begin
-	m = Model(UnoSolver.Optimizer)
+	m = Model(Ipopt.Optimizer)
 	@variables m begin
 		x
 		y[1:5]
@@ -156,7 +156,7 @@ end
 end
 
 @testset "@endo_exo!" begin
-	m = Model(UnoSolver.Optimizer)
+	m = Model(Ipopt.Optimizer)
 	@variables m begin
 		x
 		y[1:5]
@@ -616,7 +616,7 @@ end
 		@testset "Endo on LHS (simple)" begin
 			# GDP == C + I + G  =>  (GDP + GDP_J) == C + I + G
 			# Fix GDP=100, C+I+G=180, so GDP_J should be 80
-			m = Model(UnoSolver.Optimizer)
+			m = Model(Ipopt.Optimizer)
 			@variables m begin
 				GDP
 				C
@@ -640,7 +640,7 @@ end
 		@testset "Endo with coefficient (not first term)" begin
 			# 2 * a == 10  =>  2 * (a + a_J) == 10
 			# Fix a=4: 2*(4 + a_J) == 10 => a_J = 1
-			m = Model(UnoSolver.Optimizer)
+			m = Model(Ipopt.Optimizer)
 			@variable(m, a)
 			b2 = @block m begin
 				a, 2 * a == 10
@@ -656,7 +656,7 @@ end
 			# b[i] + b[i] == 4  =>  (b[i] + b_J[i]) + (b[i] + b_J[i]) == 4
 			# = 2*(b[i] + b_J[i]) == 4
 			# Fix b[i]=0: 2*(0 + b_J[i]) == 4 => b_J[i] = 2
-			m = Model(UnoSolver.Optimizer)
+			m = Model(Ipopt.Optimizer)
 			@variable(m, b[1:2])
 			b3 = @block m begin
 				b[i ∈ 1:2], b[i] + b[i] == 4
@@ -672,7 +672,7 @@ end
 			# c[i]^2 + c[i] == 6  =>  (c[i] + c_J[i])^2 + (c[i] + c_J[i]) == 6
 			# Fix c=0: (0 + c_J)^2 + (0 + c_J) == 6 => c_J^2 + c_J - 6 = 0
 			# => (c_J+3)(c_J-2) = 0 => c_J = 2 (positive root)
-			m = Model(UnoSolver.Optimizer)
+			m = Model(Ipopt.Optimizer)
 			@variable(m, c[1:2])
 			b4 = @block m begin
 				c[i ∈ 1:2], c[i]^2 + c[i] == 6
@@ -689,7 +689,7 @@ end
 			# Equation: C + I == GDP, endo is GDP
 			# Transformed: C + I == (GDP + GDP_J)
 			# Fix GDP=100, C+I=150: 150 == (100 + GDP_J) => GDP_J = 50
-			m = Model(UnoSolver.Optimizer)
+			m = Model(Ipopt.Optimizer)
 			@variables m begin
 				GDP
 				C
@@ -757,7 +757,7 @@ end
 end
 
 @testset "add_constraints!" begin
-	m = Model(UnoSolver.Optimizer)
+	m = Model(Ipopt.Optimizer)
 	@variable(m, x)
 	@variable(m, y[1:3])
 
@@ -784,7 +784,7 @@ end
 end
 
 @testset "switch between blocks" begin
-	m = Model(UnoSolver.Optimizer)
+	m = Model(Ipopt.Optimizer)
 	@variable(m, x)
 	@variable(m, y)
 
