@@ -5,7 +5,8 @@ using JuMP: @variable, @constraint, constraint_object, set_name, name
 using JuMP: set_start_value, fix, has_lower_bound, has_upper_bound
 using JuMP: lower_bound, upper_bound, set_lower_bound, set_upper_bound
 using JuMP: all_variables, is_fixed, value, add_to_expression!
-using JuMP: optimize!, set_silent, unsafe_backend
+using JuMP: optimize!, set_silent, unsafe_backend, backend, set_time_limit_sec
+import MathOptInterface as MOI
 
 # ============================================================================
 # Expression Transformation
@@ -125,15 +126,28 @@ end
 # _build_model (internal)
 # ============================================================================
 
+# Create a new model with the same optimizer and attributes (silent, time limit) as src
+function _copy_model_config(src)
+    optimizer = typeof(unsafe_backend(src))
+    dest = Model(optimizer)
+    src_backend = backend(src)
+    if MOI.get(src_backend, MOI.Silent())
+        set_silent(dest)
+    end
+    time_limit = MOI.get(src_backend, MOI.TimeLimitSec())
+    if time_limit !== nothing
+        set_time_limit_sec(dest, time_limit)
+    end
+    return dest
+end
+
 # Internal function to build a solve model from a block
 function _build_model(
     block::Block,
     data::ModelDictionary;
     start_values::Union{Nothing, ModelDictionary} = nothing
 )
-    # Get optimizer from the block's model
-    optimizer = typeof(unsafe_backend(block.model))
-    solve_model = Model(optimizer)
+    solve_model = _copy_model_config(block.model)
     endo_set = block._endogenous_set
 
     # Create endogenous variables in solve model
@@ -185,18 +199,21 @@ end
 # ============================================================================
 
 """
-    solve(block::Block, data::ModelDictionary; start_values=nothing, silent=true)
+    solve(block::Block, data::ModelDictionary; start_values=nothing)
 
 Build, optimize, and extract solution in one step.
 
 Uses the optimizer from the block's model. Creates an intermediate solve model with only
 endogenous variables, optimizes it, and returns a new ModelDictionary with the solution.
 
+Optimizer attributes (silent mode, time limit) are copied from the block's model to the
+intermediate solve model. Use `set_silent(model)` or `set_time_limit_sec(model, seconds)`
+on the original model to configure solver behavior.
+
 # Arguments
 - `block::Block`: Block defined on a model with an optimizer set
 - `data::ModelDictionary`: Data dictionary with values for all variables
 - `start_values::Union{Nothing, ModelDictionary}`: Optional starting values (overrides `data`)
-- `silent::Bool`: Whether to suppress solver output (default: true)
 
 # Returns
 A new `ModelDictionary` containing the solution values for endogenous variables,
@@ -206,6 +223,7 @@ with exogenous values copied from `data`.
 ```julia
 using Ipopt
 model = Model(Ipopt.Optimizer)
+set_silent(model)  # Suppress solver output
 @variables model begin
     x
     y
@@ -228,26 +246,28 @@ solution[y]  # 20.0
 function solve(
     block::Block,
     data::ModelDictionary;
-    start_values::Union{Nothing, ModelDictionary} = nothing,
-    silent::Bool = true
+    start_values::Union{Nothing, ModelDictionary} = nothing
 )
     result = copy(data)
-    solve!(block, result; start_values, silent)
+    solve!(block, result; start_values)
     return result
 end
 
 """
-    solve!(block::Block, data::ModelDictionary; start_values=nothing, silent=true)
+    solve!(block::Block, data::ModelDictionary; start_values=nothing)
 
 Build, optimize, and update data in-place.
 
 Like `solve`, but mutates `data` instead of returning a new ModelDictionary.
 
+Optimizer attributes (silent mode, time limit) are copied from the block's model to the
+intermediate solve model. Use `set_silent(model)` or `set_time_limit_sec(model, seconds)`
+on the original model to configure solver behavior.
+
 # Arguments
 - `block::Block`: Block defined on a model with an optimizer set
 - `data::ModelDictionary`: Data dictionary to update with solution values
 - `start_values::Union{Nothing, ModelDictionary}`: Optional starting values (overrides `data`)
-- `silent::Bool`: Whether to suppress solver output (default: true)
 
 # Returns
 The mutated `data` ModelDictionary.
@@ -260,11 +280,9 @@ solve!(block, data)  # data is updated in-place
 function solve!(
     block::Block,
     data::ModelDictionary;
-    start_values::Union{Nothing, ModelDictionary} = nothing,
-    silent::Bool = true
+    start_values::Union{Nothing, ModelDictionary} = nothing
 )
     model, var_map = _build_model(block, data; start_values)
-    silent && set_silent(model)
     optimize!(model)
 
     for (original_var, solve_var) in var_map
