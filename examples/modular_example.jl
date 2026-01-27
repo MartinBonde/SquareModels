@@ -22,7 +22,7 @@ set_silent(db.model)
 
 # Time configuration (T is non-const for T-loop calibration)
 const t₀ = 2020    # First year for variable definitions
-const max_T = 2200 # Maximum possible terminal year
+const max_T = 2100 # Maximum possible terminal year
 const t = t₀:max_T  # Full time range for variable definitions
 
 t₁::Int = t₀+1    # First endogenous year (can be modified later)
@@ -144,12 +144,12 @@ for m in submodels
 end
 
 base_model() = sum(m.define_equations() for m in submodels)
-calibration() = sum(m.define_calibration() for m in submodels)
+calibration_model() = sum(m.define_calibration() for m in submodels)
 
 # ==============================================================================
 # Solve calibration
 # ==============================================================================
-baseline = solve(calibration(), db; replace_nothing=1.0)
+baseline = solve(calibration_model(), db; replace_nothing=1.0)
 
 println("Calibrated A: ", [baseline[Production.A[s]] for s in Production.s])
 println("Calibrated α: ", [baseline[HouseHolds.α[s]] for s in Production.s])
@@ -158,13 +158,13 @@ println("Calibrated g: ", baseline[Production.g])
 # ==============================================================================
 # Scenario: Productivity shock in manufacturing
 # ==============================================================================
-T = 2060 # Terminal year can be changed
+T = 2030 # Terminal year can be changed
 scenario = copy(baseline)
 scenario[Production.K[:manuf, t]] = 60.0  # 20% increase in manufacturing capital
 
 solve!(base_model(), scenario)
 
 println("\nScenario results (T=$T):")
-println("Y[manuf,:]: ", scenario[Production.Y[:manuf, t₁:T]])
-println("p[manuf,:]: ", scenario[Production.p[:manuf, t₁:T]])
-println("U: ", scenario[HouseHolds.U[t₁:T]])
+println(scenario[Production.Y[:manuf, t₁:T]])
+println(scenario[Production.p[:manuf, t₁:T]])
+println(scenario[HouseHolds.U[t₁:T]])

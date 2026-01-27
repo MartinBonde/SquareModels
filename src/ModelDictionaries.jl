@@ -172,16 +172,20 @@ function Base.getindex(d::ModelDictionary, index::Symbol)
 end
 Base.getindex(d::ModelDictionary, index::AbstractVariableRef) = getindex(d, Symbol(name(index)))
 Base.getindex(d::ModelDictionary, index) = getindex(d, Symbol(index))
-function Base.getindex(d::ModelDictionary, container::AbstractArray{Symbol})
+function Base.getindex(d::ModelDictionary, container::AbstractArray{Symbol}, varname::Union{Nothing, Symbol}=nothing)
 	add_missing_model_variables!(d)
 	# Indices of the variables in the dictionary
 	idx = indexin([container...], [keys(d.dictionary)...])
 	# References to the values in the dictionary
 	data_view = @view(d.dictionary.values[idx])
-	return create_window(data_view, container)
+	return create_window(data_view, container, varname)
 end
-Base.getindex(d::ModelDictionary, container::AbstractArray{<:AbstractVariableRef}) = getindex(d, Symbol.(name.(container)))
-Base.getindex(d::ModelDictionary, container::AbstractArray) = getindex(d, Symbol.(container))
+function Base.getindex(d::ModelDictionary, container::AbstractArray{<:AbstractVariableRef})
+	# Extract variable base name from the first element
+	varname = isempty(container) ? nothing : Symbol(split(name(first(container)), "[")[1])
+	getindex(d, Symbol.(name.(container)), varname)
+end
+Base.getindex(d::ModelDictionary, container::AbstractArray) = getindex(d, Symbol.(container), nothing)
 
 # Filtering with a boolean ModelDictionary (e.g., d[d .> 0])
 function Base.getindex(d::ModelDictionary, mask::ModelDictionary)
@@ -226,13 +230,14 @@ d[y[2]]      # 25
 struct Window{T, S}
 	data_view::T
 	indices::S
+	varname::Union{Nothing, Symbol}
 end
-function create_window(data_view, container)
+function create_window(data_view, container, varname::Union{Nothing, Symbol}=nothing)
 	indices = (_->0).(container)
 	for (i, idx) in enumerate(eachindex(indices))
 		indices[idx] = i
 	end
-	Window(data_view, indices)
+	Window(data_view, indices, varname)
 end
 
 function Base.getproperty(w::Window, name::Symbol)
@@ -252,6 +257,44 @@ end
 	Base.iterate,
 	Base.collect,
 )
+
+_key_to_tuple(k::JuMP.Containers.DenseAxisArrayKey) = k.I
+_key_to_tuple(k::CartesianIndex) = Tuple(k)
+_key_to_tuple(k::Tuple) = k
+_key_to_tuple(k) = (k,)
+
+function Base.show(io::IO, ::MIME"text/plain", w::Window)
+	n = length(w)
+	ax = axes(w.indices)
+	# Header with variable name if available
+	varname_str = w.varname === nothing ? "" : string(w.varname)
+	if length(ax) == 1
+		print(io, n, "-element Window")
+	else
+		print(io, join(length.(ax), "×"), " Window")
+	end
+	n == 0 && return
+	println(io, ":")
+	# Get keys - for DenseAxisArray this gives the actual index values
+	ks = collect(keys(w.indices))
+	max_show = get(io, :limit, false) ? 10 : n
+	half = max_show ÷ 2
+	for (i, k) in enumerate(ks)
+		if n > max_show && i == half + 1
+			println(io, " ⋮")
+			continue
+		elseif n > max_show && half < i < n - half + 1
+			continue
+		end
+		# Format key with variable name: varname[k1, k2, ...] or varname[k]
+		k_tuple = _key_to_tuple(k)
+		idx_str = "[" * join(k_tuple, ", ") * "]"
+		key_str = varname_str * idx_str
+		print(io, " ", key_str, " => ", w.data_view[w.indices[k_tuple...]])
+		i < n && println(io)
+	end
+end
+Base.show(io::IO, w::Window) = show(io, MIME"text/plain"(), w)
 
 Base.getindex(w::Window, index::AbstractArray) = length(index) == 1 ? getindex(w, index[]) : getindex.(Ref(w), index)
 Base.getindex(w::Window, indices...) = getindex.(Ref(w.data_view), w.indices[indices...])
