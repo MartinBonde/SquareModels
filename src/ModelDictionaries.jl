@@ -930,11 +930,104 @@ end
 _bc_collect(md::ModelDictionary) = collect(md.dictionary.values)
 _bc_collect(x) = x
 
+# Lift a function to propagate nothing (like NaN propagation)
+_lift(f) = (args...) -> any(isnothing, args) ? nothing : f(args...)
+
 function Base.copy(bc::Broadcast.Broadcasted{ModelDictionaryStyle})
 	md = _find_model_dict(bc.args)
 	flat = Broadcast.flatten(bc)
 	# Unwrap ModelDictionaries to their values, broadcast scalars normally
 	unwrapped = map(_bc_collect, flat.args)
-	new_values = broadcast(flat.f, unwrapped...)
+	# Lift the function to handle nothing values
+	new_values = broadcast(_lift(flat.f), unwrapped...)
 	ModelDictionary(md.model, Dictionary(keys(md.dictionary), new_values))
+end
+
+# ==============================================================================
+# Comparison utilities
+# ==============================================================================
+"""
+	keys_match(a::ModelDictionary, b::ModelDictionary) -> Bool
+
+Check if two ModelDictionaries have matching structure: same keys with `nothing`
+values in the same positions.
+
+# Example
+```julia
+if keys_match(baseline, scenario)
+	diffs = abs.(baseline .- scenario)
+	# safe to compare numerically
+end
+```
+"""
+function keys_match(a::ModelDictionary, b::ModelDictionary)
+	keys(a) == keys(b) || return false
+	for k in keys(a)
+		xor(isnothing(a[k]), isnothing(b[k])) && return false
+	end
+	return true
+end
+
+"""
+	assert_no_diff(a::ModelDictionary, b::ModelDictionary; atol=1e-6, rtol=0.0, msg="")
+
+Assert that two ModelDictionaries have no significant differences.
+
+A difference passes if BOTH conditions are met:
+1. `|a - b| <= atol` (absolute tolerance must always be satisfied)
+2. Either `|b| <= atol` (reference is small, so relative doesn't apply)
+   OR `|a - b| / |b| <= rtol` (relative tolerance is satisfied)
+
+This approach uses absolute tolerance for small values and relative tolerance
+for large values, avoiding issues with division by near-zero references.
+
+Errors immediately if keys don't match (different keys or nothing/value mismatch).
+
+# Example
+```julia
+assert_no_diff(pre_solve, post_solve, atol=1e-6, msg="Zero shock test failed")
+assert_no_diff(baseline, scenario, atol=1e-6, rtol=0.01, msg="Differences exceed 1%")
+```
+"""
+function assert_no_diff(a::ModelDictionary, b::ModelDictionary; atol::Real=1e-6, rtol::Real=0.0, msg::String="")
+	error_msg = isempty(msg) ? "" : "$msg\n"
+
+	# Check structural match
+	if keys(a) != keys(b)
+		error("$(error_msg)Cannot compare: dictionaries have different keys")
+	end
+	mismatches = [k for k in keys(a) if xor(isnothing(a[k]), isnothing(b[k]))]
+	if !isempty(mismatches)
+		error("$(error_msg)Cannot compare: $(length(mismatches)) keys have nothing/value mismatch: $(first(mismatches, 10))$(length(mismatches) > 10 ? "..." : "")")
+	end
+
+	# Check differences using MAKRO-style logic:
+	# Pass if: |diff| <= atol AND (|ref| <= atol OR |diff/ref| <= rtol)
+	violations = Tuple{Symbol, Float64, Float64, Any, Any}[]  # (key, abs_diff, rel_diff, v1, v2)
+	for k in keys(a)
+		v1, v2 = a[k], b[k]
+		isnothing(v1) && continue
+		d = abs(v1 - v2)
+		abs_ref = abs(v2)
+		# Absolute check
+		d <= atol && continue
+		# If reference is small, only absolute matters (already failed above)
+		if abs_ref <= atol
+			push!(violations, (k, d, Inf, v1, v2))
+		else
+			# Check relative tolerance
+			rel_d = d / abs_ref
+			if rel_d > rtol
+				push!(violations, (k, d, rel_d, v1, v2))
+			end
+		end
+	end
+	if !isempty(violations)
+		sort!(violations, by=x -> -x[2])
+		lines = [isinf(rd) ? "  $k: diff=$d ($v1 vs $v2)" : "  $k: diff=$d ($(round(rd*100, digits=2))%) ($v1 vs $v2)"
+		         for (k, d, rd, v1, v2) in violations]
+		tol_desc = rtol > 0 ? "atol=$atol, rtol=$rtol" : "atol=$atol"
+		error("$(error_msg)$(length(violations)) differences exceed tolerance ($tol_desc):\n" * join(lines, "\n"))
+	end
+	return true
 end
