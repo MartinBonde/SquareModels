@@ -6,13 +6,14 @@
 # - Running counterfactual scenarios
 
 using JuMP
-using SquareModels
 using Ipopt
+using SquareModels
 
 # ------------------------------------------------------------------------------
-# Model and solver
+# Model and data container
 # ------------------------------------------------------------------------------
-model = Model(Ipopt.Optimizer)
+data = ModelDictionary(Model(Ipopt.Optimizer))
+set_silent(data.model)
 
 # ------------------------------------------------------------------------------
 # Sets
@@ -22,44 +23,39 @@ j = 1:2  # Types of labor
 # ------------------------------------------------------------------------------
 # Variables
 # ------------------------------------------------------------------------------
-@variables model begin
-    L[j]  # Labor demand
-    w[j]  # Wage
-    Y     # Output
-    C     # Consumption
-    p     # Price
+@variables data.model begin
+	L[j]  # Labor demand
+	w[j]  # Wage
+	Y     # Output
+	C     # Consumption
+	p     # Price
 
-    N[j]  # Labor force (exogenous)
-    σ     # Substitution elasticity (exogenous)
+	N[j]  # Labor force (exogenous)
+	σ     # Substitution elasticity (exogenous)
 
-    ρ[j]  # Productivity (calibrated)
-    μ[j]  # Scale parameter (calibrated)
+	ρ[j]  # Productivity (calibrated)
+	μ[j]  # Scale parameter (calibrated)
 end
 
 # ------------------------------------------------------------------------------
-# Equations
+# Data
 # ------------------------------------------------------------------------------
-# Define a Block: each line pairs an endogenous variable with its equation
-model_block = @block model begin
-    L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y   # Labor demand
-    w[j ∈ j], L[j] == ρ[j] * N[j]                 # Labor market clearing
-    Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)   # Zero profit
-    C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p  # Budget constraint
-    p,        p == 1                               # Numeraire
-end
-
-# ------------------------------------------------------------------------------
-# Exogenous values
-# ------------------------------------------------------------------------------
-data = ModelDictionary(model)
-
 data[σ] = 2.0
 data[w] .= 1
 data[N] = [3200, 500]
 data[L] = [800, 200]
 
-# Set residual values
-data[residuals(model_block)] .= 0.0
+# ------------------------------------------------------------------------------
+# Equations
+# ------------------------------------------------------------------------------
+# Define a Block: each line pairs an endogenous variable with its equation
+model_block = @block data begin
+	L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y   # Labor demand
+	w[j ∈ j], L[j] == ρ[j] * N[j]                 # Labor market clearing
+	Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)   # Zero profit
+	C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p  # Budget constraint
+	p,        p == 1                               # Numeraire
+end
 
 # ------------------------------------------------------------------------------
 # Calibration
@@ -67,29 +63,26 @@ data[residuals(model_block)] .= 0.0
 # For calibration, swap observed values with parameters to be calibrated
 calibration = copy(model_block)
 @endo_exo! calibration begin
-    μ, L
-    ρ, w
+	μ, L
+	ρ, w
 end
 
-start_values = copy(data)
-start_values[endogenous(calibration)] .= 1.0
-
-baseline = solve(calibration, data; start_values)
+baseline = solve(calibration, data; replace_nothing=1.0)
 
 # ------------------------------------------------------------------------------
 # Counterfactual scenario
 # ------------------------------------------------------------------------------
 # Start from baseline and apply shock
-shock = copy(baseline)
-shock[N] .= [2700.0, 1000.0]
-solve!(model_block, shock)
+scenario = copy(baseline)
+scenario[N] .= [2700.0, 1000.0]
+solve!(model_block, scenario)
 
 # ------------------------------------------------------------------------------
 # Results
 # ------------------------------------------------------------------------------
-differences = shock .- baseline
-multipliers = shock ./ baseline .- 1
+differences = scenario .- baseline
+multipliers = scenario ./ baseline .- 1
 
 println("Baseline: ", baseline)
-println("Shocked:  ", shock)
+println("Scenario: ", scenario)
 println("Multipliers: ", multipliers[multipliers .≠ 0])

@@ -145,7 +145,8 @@ end
 function _build_model(
     block::Block,
     data::ModelDictionary;
-    start_values::Union{Nothing, ModelDictionary} = nothing
+    start_values::Union{Nothing, ModelDictionary} = nothing,
+    replace_nothing::Union{Nothing, Number} = nothing
 )
     solve_model = _copy_model_config(block.model)
     endo_set = block._endogenous_set
@@ -179,6 +180,10 @@ function _build_model(
             catch
             end
         end
+        # Apply replace_nothing if start_val is still nothing
+        if start_val === nothing && replace_nothing !== nothing
+            start_val = replace_nothing
+        end
         if start_val !== nothing && !isnan(start_val)
             set_start_value(new_var, start_val)
         end
@@ -199,7 +204,7 @@ end
 # ============================================================================
 
 """
-    solve(block::Block, data::ModelDictionary; start_values=nothing)
+    solve(block::Block, data::ModelDictionary; start_values=nothing, replace_nothing=nothing)
 
 Build, optimize, and extract solution in one step.
 
@@ -214,6 +219,8 @@ on the original model to configure solver behavior.
 - `block::Block`: Block defined on a model with an optimizer set
 - `data::ModelDictionary`: Data dictionary with values for all variables
 - `start_values::Union{Nothing, ModelDictionary}`: Optional starting values (overrides `data`)
+- `replace_nothing::Union{Nothing, Number}`: If provided, replace `nothing` values in start
+  values with this number. If not provided, `nothing` values will cause errors.
 
 # Returns
 A new `ModelDictionary` containing the solution values for endogenous variables,
@@ -246,15 +253,16 @@ solution[y]  # 20.0
 function solve(
     block::Block,
     data::ModelDictionary;
-    start_values::Union{Nothing, ModelDictionary} = nothing
+    start_values::Union{Nothing, ModelDictionary} = nothing,
+    replace_nothing::Union{Nothing, Number} = nothing
 )
     result = copy(data)
-    solve!(block, result; start_values)
+    solve!(block, result; start_values, replace_nothing)
     return result
 end
 
 """
-    solve!(block::Block, data::ModelDictionary; start_values=nothing)
+    solve!(block::Block, data::ModelDictionary; start_values=nothing, replace_nothing=nothing)
 
 Build, optimize, and update data in-place.
 
@@ -268,6 +276,8 @@ on the original model to configure solver behavior.
 - `block::Block`: Block defined on a model with an optimizer set
 - `data::ModelDictionary`: Data dictionary to update with solution values
 - `start_values::Union{Nothing, ModelDictionary}`: Optional starting values (overrides `data`)
+- `replace_nothing::Union{Nothing, Number}`: If provided, replace `nothing` values in start
+  values with this number. If not provided, `nothing` values will cause errors.
 
 # Returns
 The mutated `data` ModelDictionary.
@@ -280,9 +290,10 @@ solve!(block, data)  # data is updated in-place
 function solve!(
     block::Block,
     data::ModelDictionary;
-    start_values::Union{Nothing, ModelDictionary} = nothing
+    start_values::Union{Nothing, ModelDictionary} = nothing,
+    replace_nothing::Union{Nothing, Number} = nothing
 )
-    model, var_map = _build_model(block, data; start_values)
+    model, var_map = _build_model(block, data; start_values, replace_nothing)
     optimize!(model)
 
     for (original_var, solve_var) in var_map

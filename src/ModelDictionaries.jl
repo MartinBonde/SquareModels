@@ -9,7 +9,7 @@ import GAMS
 """
     ModelDictionary
 
-A dictionary mapping JuMP variable names (as Symbols) to numeric values.
+A dictionary mapping symbols to numeric values, with special support for JuMP variables.
 
 `ModelDictionary` provides convenient syntax for storing and retrieving values
 associated with JuMP variables. It supports indexing by variable references,
@@ -18,7 +18,7 @@ functions.
 
 # Fields
 - `model::AbstractModel`: The JuMP model whose variables are tracked
-- `dictionary::Dictionary{Symbol, Union{Nothing, Number}}`: The underlying storage
+- `dictionary::Dictionary{Symbol, Union{Nothing, Number}}`: Storage for variable values
 
 # Examples
 ```julia

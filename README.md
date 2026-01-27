@@ -16,11 +16,12 @@ Large-scale macroeconomic models are typically "square" — each equation determ
 ```julia
 using JuMP, Ipopt, SquareModels
 
-model = Model(Ipopt.Optimizer)
+data = ModelDictionary(Model(Ipopt.Optimizer))
+set_silent(data.model)
 
 j = 1:2  # Types of labor
 
-@variables model begin
+@variables data.model begin
     L[j]  # Labor demand
     w[j]  # Wage
     Y     # Output
@@ -28,13 +29,13 @@ j = 1:2  # Types of labor
     p     # Price
 
     N[j]  # Labor force (exogenous)
-    ρ[j]  # Productivity (exogenous)
+    ρ[j]  # Productivity (calibrated)
     μ[j]  # Scale parameter (calibrated)
     σ     # Substitution elasticity (exogenous)
 end
 
 # Define a Block: each line pairs an endogenous variable with its equation
-model_block = @block model begin
+model_block = @block data begin
     L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y   # Labor demand
     w[j ∈ j], L[j] == ρ[j] * N[j]                 # Labor market clearing
     Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)   # Zero profit
@@ -42,23 +43,90 @@ model_block = @block model begin
     p,        p == 1                               # Numeraire
 end
 
-# Calibration: fix data, solve for unknowns
-fix(σ, 2)
-fix(Y, 1000)
-fix.(N, [3200, 500])
-fix.(L, [800, 200])
-set_start_value.(model_block, 1.0)
-optimize!(model)
-baseline = value_dict(model)
+# Set data values
+data[σ] = 2.0
+data[w] .= 1
+data[N] = [3200, 500]
+data[L] = [800, 200]
 
-# Counterfactual: fix calibrated parameters, shock exogenous variables
-fix(baseline)
-unfix(model_block)
-fix.(N, [2700, 1000])  # Population shock
-set_start_value(baseline)
-optimize!(model)
-println("Multipliers: ", (value_dict(model) .- baseline) ./ baseline .- 1)
+# Calibration: swap observed values with parameters to be calibrated
+calibration = copy(model_block)
+@endo_exo! calibration begin
+    μ, L
+    ρ, w
+end
 
+baseline = solve(calibration, data; replace_nothing=1.0)
+
+# Counterfactual: shock exogenous variables
+scenario = copy(baseline)
+scenario[N] .= [2700, 1000]  # Population shock
+solve!(model_block, scenario)
+
+println("Multipliers: ", scenario ./ baseline .- 1)
+```
+
+## Modular Models
+
+For larger models, organize code into Julia modules with explicit cross-module imports:
+
+> 📄 Full runnable version: [`examples/modular_example.jl`](examples/modular_example.jl)
+
+```julia
+data = ModelDictionary(Model(Ipopt.Optimizer))
+
+module Production
+    using JuMP, SquareModels
+    import ..data
+
+    const s = [:agri, :manuf]  # Sectors defined here
+
+    @variables data.model begin
+        Y[s]    # Output by sector
+        p[s]    # Price by sector
+        A[s]    # Productivity (calibrated)
+    end
+
+    function define_equations()
+        @block data begin
+            Y[s = s], Y[s] == A[s] * K[s]
+            p[s = [:agri]], p[s] == 1  # Numeraire
+        end
+    end
+
+    function define_calibration()
+        block = define_equations()
+        @endo_exo! block begin
+            A, Y  # Calibrate productivity to match output
+        end
+        block
+    end
+end
+
+module HouseHolds
+    using JuMP, SquareModels
+    import ..data
+
+    s = Main.Production.s  # Import sectors from Production
+    p = Main.Production.p  # Import prices from Production
+
+    @variables data.model begin
+        C[s]    # Consumption by sector
+        α[s]    # Consumption shares (calibrated)
+    end
+
+    function define_equations()
+        @block data begin
+            C[s = s], p[s] * C[s] == α[s] * I
+        end
+    end
+end
+
+# Assemble and solve
+submodels = [Production, HouseHolds]
+base = sum(m.define_equations() for m in submodels)
+calibration = sum(m.define_calibration() for m in submodels)
+baseline = solve(calibration, data; replace_nothing=1.0)
 ```
 
 ## Key Concepts
@@ -68,11 +136,13 @@ println("Multipliers: ", (value_dict(model) .- baseline) ./ baseline .- 1)
 A `Block` is a collection of constraints paired with their endogenous variables:
 
 ```julia
-block = @block model begin
+block = @block data begin
   x,           x == a + b
   y[i ∈ 1:3],  y[i] == i * z
 end
 ```
+
+When using `@block data` (with a `ModelDictionary`), residual values are automatically initialized to zero.
 
 Blocks can be combined with `+`:
 ```julia
@@ -91,20 +161,20 @@ calibration_block = copy(base_block)
 end
 ```
 
-## Solver Notes
+### Solving
 
-### Current Status
-The primary solver for large-scale nonlinear square systems is **CONOPT**. Currently, CONOPT is accessed via the [GAMS.jl](https://github.com/GAMS-dev/gams.jl) package, which requires a GAMS installation and license.
-
-### Roadmap
-
-The CONOPT developers are working on a direct JuMP interface for CONOPT. Once available, this will remove the GAMS dependency and simplify the setup significantly.
-
-For smaller models or testing, **Ipopt** works well and is freely available:
+Use `solve` to solve a block and return a new `ModelDictionary` with the solution:
 
 ```julia
-using Ipopt
-model = Model(Ipopt.Optimizer)
+solution = solve(block, data; replace_nothing=1.0)
+```
+
+The `replace_nothing` parameter replaces any `nothing` start values with the specified number.
+
+Use `solve!` to update the data in-place:
+
+```julia
+solve!(block, data)
 ```
 
 ## Project Structure
@@ -112,31 +182,20 @@ model = Model(Ipopt.Optimizer)
 ```
 SquareModels/
 ├── src/
-│   ├── SquareModels.jl   # Main module: Block, @block, @endo_exo!
-│   ├── endo_exo.jl       # Endo-exo swap implementation
-│   └── utils.jl          # Helper functions
+│   ├── SquareModels.jl      # Main module: Block, @block, @endo_exo!
+│   ├── endo_exo.jl          # Endo-exo swap implementation
+│   ├── ModelDictionaries.jl # Variable-value mappings
+│   ├── solve.jl             # Solve functions
+│   └── utils.jl             # Helper functions
 ├── examples/
-│   └── quick_example.jl  # Labor market model (tested)
-├── ModelDictionaries/    # Helper package for variable-value mappings
-├── GamsGDX/              # Utility for reading GAMS GDX files (optional)
+│   ├── quick_example.jl     # Simple labor market model
+│   └── modular_example.jl   # Modular CGE model example
 └── test/
     └── runtests.jl
 ```
-
-## Related Packages
-
-- **ModelDictionaries** (included): Provides `ModelDictionary` for mapping JuMP variables to values, with convenient `fix()`, `set_start_value()`, and `value()` extensions
-- **GamsGDX** (included, optional): Reads GAMS GDX files into Julia DataFrames for data transfer
-
-## Requirements
-
-- Julia 1.9+
-- JuMP 1.15+ (uses the unified nonlinear interface)
-- A nonlinear solver (Ipopt for testing, GAMS+CONOPT for production)
 
 ## License
 This project is licensed under an MIT license — see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
-
 This work is part of the [DREAM](https://dreamgruppen.dk/) group's effort to modernize economic modeling tools in Denmark and the rest of the world.

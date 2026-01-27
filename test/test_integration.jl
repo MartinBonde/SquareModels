@@ -168,8 +168,8 @@ end
 
     # After include, variables are in scope. Verify results.
     @test baseline isa ModelDictionary
-    @test shock isa ModelDictionary
-    @test shock[Y] > baseline[Y]  # Output should increase with population shock
+    @test scenario isa ModelDictionary
+    @test scenario[Y] > baseline[Y]  # Output should increase with population shock
 end
 
 end # module

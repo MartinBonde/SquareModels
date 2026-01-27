@@ -7,7 +7,7 @@ A JuMP extension for writing modular models with square systems of equations
 """
 module SquareModels
 
-export @block, Block, @endo_exo!
+export @block, Block, @endo_exo!, @variables
 export endogenous, residuals, variables, exogenous, overlaps, shared_endogenous
 export ModelDictionary, fix, unfix, set_start_value, value, value_dict, add_missing_model_variables!
 export unload, load
@@ -28,7 +28,7 @@ using Lazy
 using JuMP: JuMP, AbstractModel, AbstractVariableRef, VariableRef, ConstraintRef, Containers
 using JuMP: AffExpr, QuadExpr, NonlinearExpr
 using JuMP.Containers: DenseAxisArray
-using JuMP: @variable, @constraint, constraint_object
+using JuMP: @variables, @variable, @constraint, constraint_object
 using JuMP: set_name, name, variable_by_name, fix, is_fixed, unfix, all_variables, value, set_start_value
 using JuMP: list_of_constraint_types, all_constraints, is_valid, object_dictionary
 
@@ -499,9 +499,13 @@ function _substitute_with_residual(expr, target::Symbol, model_sym, residual_sym
 	end
 end
 
+"""Extract the JuMP model from a container (ModelDictionary or Model)"""
+_get_model(m::AbstractModel) = m
+# _get_model for ModelDictionary is defined after ModelDictionaries.jl is included
+
 """Helper macro for Block macro - returns (endogenous, residuals, constraints) where constraints are vectors parallel to endogenous"""
-macro _block(model, ref_vars, constraint, extra...)
-	_error(str...) = JuMP._macro_error(:block, (model, ref_vars, constraint, extra...), __source__, str...)
+macro _block(container, ref_vars, constraint, extra...)
+	_error(str...) = JuMP._macro_error(:block, (container, ref_vars, constraint, extra...), __source__, str...)
 	code = Expr(:block)
 	base_sym = _get_name(ref_vars)
 	constraint_name = make_constraint_name(base_sym)
@@ -509,28 +513,33 @@ macro _block(model, ref_vars, constraint, extra...)
 	residual_name = make_residual_name(base_sym)
 	residual_symbol = Symbol(residual_name)
 
-	push!(code.args, :(unregister($model, Symbol($constraint_name))))
+	# Use _get_model to extract the JuMP model at runtime
+	model_expr = :(SquareModels._get_model($container))
+
+	push!(code.args, :(unregister($model_expr, Symbol($constraint_name))))
 	# Create residual variable with same shape as original variable (using copy_variable)
 	push!(code.args, :(SquareModels.copy_variable($residual_name, $base_sym)))
 
 	# Transform constraint: replace endo with (endo + model[:endo_J])
-	transformed_constraint = _substitute_with_residual(constraint, base_sym, model, residual_symbol)
+	transformed_constraint = _substitute_with_residual(constraint, base_sym, model_expr, residual_symbol)
 
 	if isa(ref_vars, Symbol)
 		# Scalar variable case - single constraint
 		macrocall = quote
-			let cons = @constraint($model, $constraint_symbol, $transformed_constraint, $(extra...))
+			let _m = $model_expr
+				cons = @constraint(_m, $constraint_symbol, $transformed_constraint, $(extra...))
 				endo = $ref_vars
-				resid = $model[$(QuoteNode(residual_symbol))]
+				resid = _m[$(QuoteNode(residual_symbol))]
 				([endo], [resid], ConstraintRef[cons])
 			end
 		end
 	elseif isexpr(ref_vars, :ref)
 		indices = ref_vars.args[2:end]
 		macrocall = quote
-			let cons = @constraint($model, $constraint_symbol[$(indices...)], $transformed_constraint, $(extra...))
+			let _m = $model_expr
+				cons = @constraint(_m, $constraint_symbol[$(indices...)], $transformed_constraint, $(extra...))
 				endos = [$base_sym[axes(cons)...]...]
-				resids = [$model[$(QuoteNode(residual_symbol))][axes(cons)...]...]
+				resids = [_m[$(QuoteNode(residual_symbol))][axes(cons)...]...]
 				con_refs = ConstraintRef[cons[axes(cons)...]...]
 				(endos, resids, con_refs)
 			end
@@ -609,6 +618,8 @@ macro block(model, expr)
 	    end
 	end
 	quote
+	    _container = $(esc(model))
+	    _model = SquareModels._get_model(_container)
 	    results = [$code...]
 	    endogenous = Iterators.flatten([r[1] for r in results])
 	    residuals = Iterators.flatten([r[2] for r in results])
@@ -621,7 +632,12 @@ macro block(model, expr)
 	    for c in cons_vec
 	        SquareModels.collect_variables!(all_vars, constraint_object(c).func)
 	    end
-	    Block($(esc(model)), endo_vec, res_vec, all_vars, cons_vec)
+	    _block = Block(_model, endo_vec, res_vec, all_vars, cons_vec)
+	    # If container is a ModelDictionary, initialize residuals to 0
+	    if _container isa ModelDictionary
+	        _container[SquareModels.residuals(_block)] .= 0.0
+	    end
+	    _block
 	end
 end
 
@@ -711,5 +727,8 @@ end
 include("endo_exo.jl")
 include("ModelDictionaries.jl")
 include("solve.jl")
+
+# Define _get_model for ModelDictionary (after ModelDictionaries.jl is included)
+_get_model(md::ModelDictionary) = md.model
 
 end # Module
