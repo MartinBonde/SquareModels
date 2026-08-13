@@ -26,6 +26,7 @@ Large-scale macroeconomic models are typically "square" — each equation determ
 - **Map constraints to endogenous variables** — Each constraint is explicitly paired with the variable it determines
 - **Build models modularly** — Define separate `Block`s of equations that can be combined
 - **Swap endogenous/exogenous variables** — Use `@endo_exo_swap!` to change which variables are endogenous for calibration or counterfactual scenarios
+- **Test redundant constraints** — Add `@test_constraint` entries without adding solve constraints
 - **Inspect results** — Print, evaluate, and plot model data with `@prt`, `@evalexpr`, and `@plot`
 
 ## Quick Example
@@ -46,6 +47,7 @@ j = 1:2  # Types of labor
     L[j], "Labor demand"
     w[j], "Wage"
     Y, "Output"
+    Cj[j], "Consumption by labor type"
     C, "Consumption"
     p, "Price"
 
@@ -60,7 +62,9 @@ model_block = @block data begin
     L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y   # Labor demand
     w[j ∈ j], L[j] == ρ[j] * N[j]                 # Labor market clearing
     Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)   # Zero profit
+    Cj[j ∈ j], Cj[j] == w[j] * ρ[j] * N[j] / p    # Consumption by labor type
     C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p  # Budget constraint
+    @test_constraint "Consumption aggregation" C, C == ∑(Cj[j] for j ∈ j)
     p,        p == 1                               # Numeraire
 end
 
@@ -86,6 +90,30 @@ solve!(model_block, scenario)
 
 println("Multipliers: ", scenario ./ baseline .- 1)
 ```
+
+## Test Constraints
+
+Use `@test_constraint` for a constraint that must hold but must not determine an
+endogenous variable. Test constraints can use `==`, `<=`, or `>=`. They do not
+add residual variables or solve constraints.
+
+```julia
+block = @block data begin
+    a_i[i ∈ industries, t ∈ periods], a_i[i, t] == b_i[i, t] + c_i[i, t]
+    a[t ∈ periods], a[t] == b[t] + c[t]
+    @test_constraint "a aggregation" a[t ∈ periods], a[t] == ∑(a_i[i, t] for i ∈ industries)
+    b[t ∈ periods], b[t] == ∑(b_i[i, t] for i ∈ industries)
+    c[t ∈ periods], c[t] == ∑(c_i[i, t] for i ∈ industries)
+end
+
+solution = solve(block, data)
+```
+
+`solve` and `solve!` run the test constraints after a successful solve. Set
+`run_test_constraints=false` to skip them. The default tolerances are
+`test_constraint_atol=1e-6` and `test_constraint_rtol=1e-8`. Use
+`assert_test_constraints` to test a loaded or edited `ModelDictionary`, and use
+`test_constraint_variables` to find data that only the tests need.
 
 ## Documentation
 

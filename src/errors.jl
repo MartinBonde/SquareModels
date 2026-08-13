@@ -22,7 +22,8 @@ end
 Concrete subtypes carry the offending data as fields, so logging code can format
 it however it wants instead of parsing a message string.
 
-See also: [`ResidualError`](@ref), [`ToleranceError`](@ref), [`NonSquareError`](@ref).
+See also: [`ResidualError`](@ref), [`ToleranceError`](@ref), [`TestConstraintError`](@ref),
+[`NonSquareError`](@ref).
 """
 abstract type SquareModelError <: Exception end
 
@@ -74,6 +75,34 @@ function Base.showerror(io::IO, e::ToleranceError)
 		line = isinf(rd) ? "  $(k): diff=$(d) ($(v1) vs $(v2))" :
 		       "  $(k): diff=$(d) ($(round(rd * 100, digits=2))%) ($(v1) vs $(v2))"
 		print(io, "\n", line)
+	end
+end
+
+"""
+	TestConstraintError <: SquareModelError
+
+Thrown by [`assert_test_constraints`](@ref) when one or more test constraints
+exceed their tolerance. Each `violations` entry is
+`(name, distance, tolerance, message)`.
+`distance` is the distance from the evaluated JuMP expression to its constraint
+set. `data` is the tested dictionary, including the solved copy when [`solve`](@ref)
+throws this error.
+"""
+struct TestConstraintError{D} <: SquareModelError
+	violations::Vector{Tuple{String, Float64, Float64, String}}
+	atol::Float64
+	rtol::Float64
+	msg::String
+	data::D
+end
+
+function Base.showerror(io::IO, e::TestConstraintError)
+	isempty(e.msg) || print(io, e.msg, "\n")
+	tol_desc = e.rtol > 0 ? "atol=$(e.atol), rtol=$(e.rtol)" : "atol=$(e.atol)"
+	print(io, "$(length(e.violations)) test constraints exceed tolerance ($tol_desc):")
+	for (name, distance, tolerance, message) in e.violations
+		print(io, "\n  $(name): distance=$(distance), tolerance=$(tolerance)")
+		isempty(message) || print(io, ": ", message)
 	end
 end
 

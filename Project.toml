@@ -1,6 +1,6 @@
 name = "SquareModels"
 uuid = "8f61fe60-8cc6-11ec-3043-2171a73045bd"
-version = "0.6.5"
+version = "0.7.0"
 authors = ["Martin Kirk Bonde <martin@bonde.dk>"]
 
 [deps]

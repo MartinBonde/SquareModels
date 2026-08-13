@@ -23,6 +23,50 @@ full_model = households + production + government
 Use [`endogenous`](@ref), [`exogenous`](@ref), [`variables`](@ref), and
 [`residuals`](@ref) to inspect the block.
 
+## Test Constraints
+
+Use `@test_constraint` for a constraint that must hold but must not determine
+another endogenous variable:
+
+```julia
+block = @block data begin
+    a_i[i ∈ industries, t ∈ periods], a_i[i, t] == b_i[i, t] + c_i[i, t]
+    a[t ∈ periods], a[t] == b[t] + c[t]
+    @test_constraint "a aggregation" a[t ∈ periods], a[t] == ∑(a_i[i, t] for i ∈ industries)
+    b[t ∈ periods], b[t] == ∑(b_i[i, t] for i ∈ industries)
+    c[t ∈ periods], c[t] == ∑(c_i[i, t] for i ∈ industries)
+end
+```
+
+Test constraints create no residual variables and do not enter the solve model.
+`solve` and `solve!` evaluate them with JuMP after each successful solve:
+
+```julia
+solution = solve(block, data)
+```
+
+Test constraints accept `==`, `<=`, and `>=`. SquareModels does not add a
+residual to a test constraint. Add one when the test must include the gap that
+the solve equation absorbs:
+
+```julia
+block = @block data begin
+    a[t ∈ periods], a[t] == b[t] + c[t]
+    @test_constraint "a aggregation with residual" a[t ∈ periods],
+        a[t] + residual(a)[t] == ∑(a_i[i, t] for i ∈ industries)
+end
+```
+
+Here, `residual(a)` returns the residual that the solve equation for `a` creates.
+Omit it when the test must compare the reported value of `a` itself.
+
+Set `run_test_constraints=false` to skip them. Use `test_constraint_atol` and
+`test_constraint_rtol` to set their tolerances (defaults: `1e-6` and `1e-8`). Use
+[`assert_test_constraints`](@ref) to test a loaded or edited `ModelDictionary`
+without a solve. [`test_constraint_variables`](@ref) returns the variables that
+the tests need. These variables stay out of [`variables`](@ref) and
+[`exogenous`](@ref) unless a solve constraint also uses them.
+
 ## Endo-Exo Swapping
 
 Calibration often means solving for parameters that are normally exogenous while

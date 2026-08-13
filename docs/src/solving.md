@@ -71,6 +71,23 @@ solution = solve(block, data; start_values=baseline, replace_nothing=1.0)
 `replace_nothing` is useful during early calibration when a variable exists in
 the model but has no data value yet.
 
+## Test Constraints
+
+After a successful solve, `solve` and `solve!` run each `@test_constraint` entry
+in the block. Test constraints can use `==`, `<=`, or `>=` and do not enter the
+solve model. Set their tolerances with `test_constraint_atol` and
+`test_constraint_rtol` (defaults: `1e-6` and `1e-8`):
+
+```julia
+solution = solve(block, data; test_constraint_atol=1e-8, test_constraint_rtol=1e-6)
+```
+
+Set `run_test_constraints=false` for a partial solve that does not yet meet all
+test constraints. If one fails after `solve!`, the dictionary keeps the solved
+values. If one fails after `solve`, the `TestConstraintError.data` field holds
+the solved copy. Use [`assert_test_constraints`](@ref) to test a loaded or edited
+dictionary without another solve.
+
 ## Choosing a Solver
 
 [`square_model`](@ref) constructs a JuMP model configured as a square nonlinear
@@ -101,5 +118,5 @@ Call [`diagnose`](@ref) directly when you want to inspect those structural issue
 trivial, orphans = diagnose(block, data)
 ```
 
-Set `skip_diagnostics=true` only when you have already validated the block and
-need to avoid the extra pre-solve pass.
+Set `presolve_diagnostics=false` only when you have already validated the block
+and need to avoid the extra pre-solve pass.

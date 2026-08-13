@@ -227,6 +227,66 @@ end
 # Diagnostics
 # ============================================================================
 
+function _test_constraint_value(test_constraint::TestConstraint, data::ModelDictionary)
+    return Float64(JuMP.value(test_constraint.equation.func) do var
+        data_value = data[var]
+        data_value === nothing && error("No data value for test constraint variable $(name(var))")
+        data_value
+    end)
+end
+
+"""
+    assert_test_constraints(block::Block, data::ModelDictionary; atol=1e-6, rtol=1e-8, msg="")
+
+Test all [`@test_constraint`](@ref) entries in `block` against `data`.
+
+JuMP evaluates each stored expression with values from `data`. SquareModels then
+uses MathOptInterface to get its distance from the constraint set. It does not
+add test constraints to the solve model and does not run a second solve.
+
+A test constraint passes when its distance is at most
+`max(atol, rtol * abs(data[test_constraint.variable]))`. Its optional message
+appears in the error output if it fails. This function returns `true` if all test
+constraints pass and throws [`TestConstraintError`](@ref) if one or more fail.
+
+# Example
+```julia
+block = @block model begin
+    a, a == b + c
+    @test_constraint "a aggregation" a, a == sum(a_i)
+end
+
+solution = solve(block, data)
+assert_test_constraints(block, solution; atol=1e-8)
+```
+"""
+function assert_test_constraints(
+    block::Block,
+    data::ModelDictionary;
+    atol::Real=1e-6,
+    rtol::Real=1e-8,
+    msg::String="",
+)
+    violations = Tuple{String, Float64, Float64, String}[]
+    for test_constraint in block.test_constraints
+        value = _test_constraint_value(test_constraint, data)
+        distance = Float64(MOI.Utilities.distance_to_set(value, test_constraint.equation.set))
+        tolerance = Float64(atol)
+        if rtol > 0
+            scale = data[test_constraint.variable]
+            scale === nothing && error("No data value for test constraint scale variable $(name(test_constraint.variable))")
+            tolerance = max(tolerance, Float64(rtol) * abs(scale))
+        end
+        (!isfinite(distance) || distance > tolerance) &&
+            push!(violations, (name(test_constraint.variable), distance, tolerance, test_constraint.message))
+    end
+    if !isempty(violations)
+        sort!(violations, by=x -> isnan(x[2]) ? Inf : x[2], rev=true)
+        throw(TestConstraintError(violations, Float64(atol), Float64(rtol), msg, data))
+    end
+    return true
+end
+
 struct TrivialEquation
     index::Int
     endogenous::VariableRef
@@ -336,7 +396,7 @@ function _build_model(
     data::ModelDictionary;
     start_values::Union{Nothing, ModelDictionary} = nothing,
     replace_nothing::Union{Nothing, Number} = nothing,
-    skip_diagnostics::Bool = false
+    presolve_diagnostics::Bool = true
 )
     for res in block.residuals
         if !(res ∈ data) || data[res] === nothing
@@ -380,15 +440,15 @@ function _build_model(
         end
     end
 
-    trivial = skip_diagnostics ? nothing : TrivialEquation[]
-    endos_used = skip_diagnostics ? nothing : Set{VariableRef}()
-    reverse_map = skip_diagnostics ? nothing : Dict{VariableRef, VariableRef}(v => k for (k, v) in var_map)
+    trivial = presolve_diagnostics ? TrivialEquation[] : nothing
+    endos_used = presolve_diagnostics ? Set{VariableRef}() : nothing
+    reverse_map = presolve_diagnostics ? Dict{VariableRef, VariableRef}(v => k for (k, v) in var_map) : nothing
 
     for (i, eq) in enumerate(block.equations)
         new_func = transform_expr(eq.func, var_map, data, endo_set)
         con = @constraint(solve_model, new_func in eq.set)
         set_name(con, name(block.endogenous[i]))
-        if !skip_diagnostics
+        if presolve_diagnostics
             if !_has_effective_variables(new_func)
                 push!(trivial, TrivialEquation(i, block.endogenous[i], block.residuals[i], _constant_value(new_func)))
             else
@@ -402,7 +462,7 @@ function _build_model(
         end
     end
 
-    if !skip_diagnostics
+    if presolve_diagnostics
         orphans = OrphanVariable[OrphanVariable(v) for v in block.endogenous if v ∉ endos_used]
         if !isempty(trivial) || !isempty(orphans)
             throw(NonSquareError("Model is not effectively square after substituting exogenous values.\n" *
@@ -533,7 +593,9 @@ end
 # ============================================================================
 
 """
-    solve(block::Block, data::ModelDictionary; start_values=nothing, replace_nothing=nothing, skip_diagnostics=false)
+    solve(block::Block, data::ModelDictionary; start_values=nothing, replace_nothing=nothing,
+          presolve_diagnostics=true, run_test_constraints=true,
+          test_constraint_atol=1e-6, test_constraint_rtol=1e-8)
 
 Build, optimize, and extract solution in one step.
 
@@ -541,7 +603,12 @@ Uses the optimizer from the block's model. Creates an intermediate solve model w
 endogenous variables, optimizes it, and returns a new ModelDictionary with the solution.
 
 Before solving, runs diagnostics to detect trivial equations and orphan variables
-(set `skip_diagnostics=true` to disable if performance is a concern).
+(set `presolve_diagnostics=false` to disable them).
+
+After solving, runs all `@test_constraint` entries in the block. Set
+`run_test_constraints=false` to skip them. Use `test_constraint_atol` and
+`test_constraint_rtol` to set their tolerances. If a test constraint fails, the
+thrown [`TestConstraintError`](@ref) stores the solved copy in its `data` field.
 
 Optimizer attributes (silent mode, time limit) are copied from the block's model to the
 intermediate solve model. Use `set_silent(model)` or `set_time_limit_sec(model, seconds)`
@@ -553,7 +620,10 @@ on the original model to configure solver behavior.
 - `start_values::Union{Nothing, ModelDictionary}`: Optional starting values (overrides `data`)
 - `replace_nothing::Union{Nothing, Number}`: If provided, replace `nothing` values in start
   values with this number. If not provided, `nothing` values will cause errors.
-- `skip_diagnostics::Bool`: Skip pre-solve diagnostic checks (default `false`)
+- `presolve_diagnostics::Bool`: Run structural diagnostics before the solve (default `true`)
+- `run_test_constraints::Bool`: Run test constraints after the solve (default `true`)
+- `test_constraint_atol::Real`: Absolute tolerance for test constraints (default `1e-6`)
+- `test_constraint_rtol::Real`: Relative tolerance for test constraints (default `1e-8`)
 
 # Returns
 A new `ModelDictionary` containing the solution values for endogenous variables,
@@ -587,22 +657,39 @@ function solve(
     data::ModelDictionary;
     start_values::Union{Nothing, ModelDictionary} = nothing,
     replace_nothing::Union{Nothing, Number} = nothing,
-    skip_diagnostics::Bool = false
+    presolve_diagnostics::Bool = true,
+    run_test_constraints::Bool = true,
+    test_constraint_atol::Real = 1e-6,
+    test_constraint_rtol::Real = 1e-8,
 )
     result = copy(data)
-    solve!(block, result; start_values, replace_nothing, skip_diagnostics)
+    solve!(block, result;
+        start_values,
+        replace_nothing,
+        presolve_diagnostics,
+        run_test_constraints,
+        test_constraint_atol,
+        test_constraint_rtol,
+    )
     return result
 end
 
 """
-    solve!(block::Block, data::ModelDictionary; start_values=nothing, replace_nothing=nothing, skip_diagnostics=false)
+    solve!(block::Block, data::ModelDictionary; start_values=nothing, replace_nothing=nothing,
+           presolve_diagnostics=true, run_test_constraints=true,
+           test_constraint_atol=1e-6, test_constraint_rtol=1e-8)
 
 Build, optimize, and update data in-place.
 
 Like `solve`, but mutates `data` instead of returning a new ModelDictionary.
 
 Before solving, runs diagnostics to detect trivial equations and orphan variables
-(set `skip_diagnostics=true` to disable if performance is a concern).
+(set `presolve_diagnostics=false` to disable them).
+
+After writing the solved values to `data`, runs all `@test_constraint` entries in
+the block. If one fails, `data` keeps the solved values for inspection. Set
+`run_test_constraints=false` to skip them. Use `test_constraint_atol` and
+`test_constraint_rtol` to set their tolerances.
 
 Optimizer attributes (silent mode, time limit) are copied from the block's model to the
 intermediate solve model. Use `set_silent(model)` or `set_time_limit_sec(model, seconds)`
@@ -614,7 +701,10 @@ on the original model to configure solver behavior.
 - `start_values::Union{Nothing, ModelDictionary}`: Optional starting values (overrides `data`)
 - `replace_nothing::Union{Nothing, Number}`: If provided, replace `nothing` values in start
   values with this number. If not provided, `nothing` values will cause errors.
-- `skip_diagnostics::Bool`: Skip pre-solve diagnostic checks (default `false`)
+- `presolve_diagnostics::Bool`: Run structural diagnostics before the solve (default `true`)
+- `run_test_constraints::Bool`: Run test constraints after the solve (default `true`)
+- `test_constraint_atol::Real`: Absolute tolerance for test constraints (default `1e-6`)
+- `test_constraint_rtol::Real`: Relative tolerance for test constraints (default `1e-8`)
 
 # Returns
 The mutated `data` ModelDictionary.
@@ -629,9 +719,12 @@ function solve!(
     data::ModelDictionary;
     start_values::Union{Nothing, ModelDictionary} = nothing,
     replace_nothing::Union{Nothing, Number} = nothing,
-    skip_diagnostics::Bool = false
+    presolve_diagnostics::Bool = true,
+    run_test_constraints::Bool = true,
+    test_constraint_atol::Real = 1e-6,
+    test_constraint_rtol::Real = 1e-8,
 )
-    model, var_map = _build_model(block, data; start_values, replace_nothing, skip_diagnostics)
+    model, var_map = _build_model(block, data; start_values, replace_nothing, presolve_diagnostics)
     try
         optimize!(model)
     finally
@@ -645,5 +738,7 @@ function solve!(
     for (original_var, solve_var) in var_map
         data[original_var] = value(solve_var)
     end
+    run_test_constraints && !isempty(block.test_constraints) &&
+        assert_test_constraints(block, data; atol=test_constraint_atol, rtol=test_constraint_rtol)
     return data
 end
