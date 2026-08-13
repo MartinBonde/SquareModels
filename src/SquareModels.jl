@@ -85,15 +85,6 @@ struct TestConstraint
 	message::String
 end
 
-_canonical_equal(a, b) = isequal(a, b)
-_canonical_equal(a::T, b::T) where {T<:JuMP.AbstractJuMPScalar} = JuMP.isequal_canonical(a, b)
-
-_same_test_constraint(a::TestConstraint, b::TestConstraint) =
-	a.variable == b.variable &&
-	_canonical_equal(a.equation.func, b.equation.func) &&
-	a.equation.set == b.equation.set &&
-	a.message == b.message
-
 collect_variables!(vars::Set{VariableRef}, eq::Equation) = collect_variables!(vars, eq.func)
 
 """
@@ -577,16 +568,11 @@ function Base.:-(a::Block, b::Block)
 		collect_variables!(all_vars, eq.func)
 	end
 
-	b_test_constraints = Dict{VariableRef, Vector{TestConstraint}}()
-	foreach(b.test_constraints) do c
-		push!(get!(b_test_constraints, c.variable) do
-			TestConstraint[]
-		end, c)
+	filtered_test_constraints = copy(a.test_constraints)
+	for constraint in b.test_constraints
+		index = findfirst(candidate -> candidate === constraint, filtered_test_constraints)
+		index === nothing || deleteat!(filtered_test_constraints, index)
 	end
-	filtered_test_constraints = filter(
-		c -> !any(bc -> _same_test_constraint(c, bc), get(b_test_constraints, c.variable, ())),
-		a.test_constraints,
-	)
 	Block(a.model, a.endogenous[mask], a.residuals[mask], all_vars, filtered_eqs, filtered_test_constraints)
 end
 

@@ -1023,20 +1023,14 @@ end
 	rebuilt_test_constraints = @block m begin
 		@test_constraint "a aggregation" a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
 	end
-	@test isempty(test_constraints(block - rebuilt_test_constraints))
+	@test length(test_constraints(block + rebuilt_test_constraints)) == 4
+	@test length(test_constraints(block - rebuilt_test_constraints)) == 2
+	@test test_constraints((block + rebuilt_test_constraints) - rebuilt_test_constraints) == test_constraints(block)
 
 	different_message = @block m begin
 		@test_constraint "other aggregation" a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
 	end
 	@test length(test_constraints(block - different_message)) == 2
-
-	nonlinear_left = @block m_bad begin
-		@test_constraint "nonlinear" x, sin(x) + x^3 == 0
-	end
-	nonlinear_right = @block m_bad begin
-		@test_constraint "nonlinear" x, sin(x) + x^3 == 0
-	end
-	@test isempty(test_constraints(nonlinear_left - nonlinear_right))
 
 	scaled_solution = copy(solution)
 	scaled_solution[observed_a[1]] = 1e8
