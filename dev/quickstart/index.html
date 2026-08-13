@@ -13,6 +13,7 @@ j = 1:2
     L[j], &quot;Labor demand&quot;
     w[j], &quot;Wage&quot;
     Y, &quot;Output&quot;
+    Cj[j], &quot;Consumption by labor type&quot;
     C, &quot;Consumption&quot;
     p, &quot;Price&quot;
 
@@ -30,11 +31,13 @@ nothing</code></pre><p><code>@block</code> pairs every endogenous variable with 
     L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y
     w[j ∈ j], L[j] == ρ[j] * N[j]
     Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)
+    Cj[j ∈ j], Cj[j] == w[j] * ρ[j] * N[j] / p
     C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p
+    @test_constraint &quot;Consumption aggregation&quot; C, C == ∑(Cj[j] for j ∈ j)
     p,        p == 1
 end
 
-length(model_block)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">7</code></pre><p>Calibration is an endo-exo swap: observed variables become fixed data, while normally exogenous parameters become endogenous calibration targets.</p><pre><code class="language-julia hljs">calibration = copy(model_block)
+length(model_block)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">9</code></pre><p>Calibration is an endo-exo swap: observed variables become fixed data, while normally exogenous parameters become endogenous calibration targets.</p><pre><code class="language-julia hljs">calibration = copy(model_block)
 @endo_exo_swap! calibration begin
     μ, L
     ρ, w
@@ -49,4 +52,4 @@ solve!(model_block, scenario)
 
 round.(scenario[L] ./ baseline[L] .- 1, digits=4)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">2-element Vector{Float64}:
  -0.1562
-  1.0</code></pre></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../">« Home</a><a class="docs-footer-nextpage" href="../concepts/">Core Concepts »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Wednesday 22 July 2026 14:36">Wednesday 22 July 2026</span>. Using Julia version 1.12.6.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
+  1.0</code></pre></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../">« Home</a><a class="docs-footer-nextpage" href="../concepts/">Core Concepts »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Thursday 13 August 2026 11:42">Thursday 13 August 2026</span>. Using Julia version 1.12.6.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
