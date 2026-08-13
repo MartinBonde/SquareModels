@@ -413,11 +413,11 @@ end
     data[residuals(b1)] .= 0.0
 
     # Pair z with an equation that only references x and y (z never appears)
-    b2 = add_equation(model, z, y - x, 0)
-    data[residuals(b2)] .= 0.0
-    block = b1 + b2
+    add_equation!(b1, z, y - x, 0)
+    data[residuals(b1)] .= 0.0
+    block = b1
 
-    # eq2 is "y - x + z_J == 0". After substitution, z_J is exogenous (fixed=0),
+    # eq2 is "y - x - z_J == 0". After substitution, z_J is exogenous (fixed=0),
     # y and x are mixed: x is endogenous (in eq1), y is exogenous.
     # Result: eq2 still has variable x, so it's NOT trivial.
     # But z is endogenous and appears in NO equation — it's an orphan.
@@ -451,11 +451,11 @@ end
     data[residuals(b1)] .= 0.0
 
     # Pair y with an equation involving only exogenous a and b
-    b2 = add_equation(model, y, a - b, 0)  # a - b + y_J == 0, y is endo but not in eq
-    data[residuals(b2)] .= 0.0
-    block = b1 + b2
+    add_equation!(b1, y, a - b, 0)  # a - b - y_J == 0, y is endo but not in eq
+    data[residuals(b1)] .= 0.0
+    block = b1
 
-    # eq2: "a - b + y_J == 0". a, b, y_J are all exogenous.
+    # eq2: "a - b - y_J == 0". a, b, y_J are all exogenous.
     # After substitution: 3 - 4 + 0 = -1 (constant). Truly trivial.
     # y is endogenous but appears in no equation → orphan.
     trivial, orphans = diagnose(block, data)
@@ -485,9 +485,9 @@ end
     end
     data[residuals(b1)] .= 0.0
 
-    b2 = add_equation(model, z, y - x, 0)
-    data[residuals(b2)] .= 0.0
-    block = b1 + b2
+    add_equation!(b1, z, y - x, 0)
+    data[residuals(b1)] .= 0.0
+    block = b1
 
     @test_throws NonSquareError solve(block, data)
 
@@ -567,9 +567,9 @@ end
     data[residuals(b1)] .= 0.0
 
     # z's equation involves a * sin(z), but a=0 → sin(z) branch is zeroed out
-    b2 = add_equation(model, z, x + a * sin(z), 5)
-    data[residuals(b2)] .= 0.0
-    block = b1 + b2
+    add_equation!(b1, z, x + a * sin(z), 5)
+    data[residuals(b1)] .= 0.0
+    block = b1
 
     trivial, orphans = diagnose(block, data)
     @test isempty(trivial)
