@@ -2,6 +2,7 @@
 #
 # This example demonstrates the core features of SquareModels:
 # - Defining blocks of equations with paired endogenous variables
+# - Testing a redundant aggregate constraint outside the solve system
 # - Calibrating parameters from data
 # - Running counterfactual scenarios
 
@@ -27,6 +28,7 @@ j = 1:2  # Types of labor
 	L[j], "Labor demand"
 	w[j], "Wage"
 	Y, "Output"
+	Cj[j], "Consumption by labor type"
 	C, "Consumption"
 	p, "Price"
 
@@ -53,7 +55,9 @@ model_block = @block data begin
 	L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y   # Labor demand
 	w[j ∈ j], L[j] == ρ[j] * N[j]                 # Labor market clearing
 	Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)   # Zero profit
+	Cj[j ∈ j], Cj[j] == w[j] * ρ[j] * N[j] / p    # Consumption by labor type
 	C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p  # Budget constraint
+	@test_constraint "Consumption aggregation" C, C == ∑(Cj[j] for j ∈ j)
 	p,        p == 1                               # Numeraire
 end
 

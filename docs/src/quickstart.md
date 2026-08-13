@@ -18,6 +18,7 @@ j = 1:2
     L[j], "Labor demand"
     w[j], "Wage"
     Y, "Output"
+    Cj[j], "Consumption by labor type"
     C, "Consumption"
     p, "Price"
 
@@ -42,7 +43,9 @@ model_block = @block data begin
     L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y
     w[j ∈ j], L[j] == ρ[j] * N[j]
     Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)
+    Cj[j ∈ j], Cj[j] == w[j] * ρ[j] * N[j] / p
     C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p
+    @test_constraint "Consumption aggregation" C, C == ∑(Cj[j] for j ∈ j)
     p,        p == 1
 end
 

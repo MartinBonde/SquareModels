@@ -7,12 +7,12 @@ A JuMP extension for writing modular models with square systems of equations
 """
 module SquareModels
 
-export @block, Block, Equation, @endo_exo_swap!, @variables, add_equation, add_equation!
+export @block, @test_constraint, Block, TestConstraint, Equation, @endo_exo_swap!, @variables, add_equation, add_equation!
 export endogenous, residuals, residual, variables, exogenous, is_endogenous, overlaps, shared_endogenous
 export VariableRef  # Re-exported from JuMP for macro hygiene
 export ModelDictionary, fix, unfix, set_start_value, value, value_dict, add_missing_model_variables!
-export keys_match, assert_no_diff, assert_residuals_small
-export SquareModelError, ResidualError, ToleranceError, NonSquareError
+export keys_match, assert_no_diff, assert_residuals_small, assert_test_constraints, test_constraints, test_constraint_variables
+export SquareModelError, ResidualError, ToleranceError, TestConstraintError, NonSquareError
 export unload, load, read_indices, read_sparse_array, read_variable
 export RESIDUAL_SUFFIX
 export solve, solve!, diagnose, annotate_lst!, square_model
@@ -70,6 +70,21 @@ struct Equation
 	set::MOI.AbstractScalarSet
 end
 
+"""
+    TestConstraint
+
+A constraint that tests a solution but does not determine an endogenous variable.
+
+`@test_constraint` entries in a [`@block`](@ref) create one `TestConstraint` per
+index. Each test constraint stores a variable used for its name and relative
+tolerance, its JuMP equation, and an optional message.
+"""
+struct TestConstraint
+	variable::VariableRef
+	equation::Equation
+	message::String
+end
+
 collect_variables!(vars::Set{VariableRef}, eq::Equation) = collect_variables!(vars, eq.func)
 
 """
@@ -118,6 +133,7 @@ added to an intermediate solve model.
 - `variables::Set{VariableRef}`: All variables appearing in the block's equations
 - `_endogenous_set::Set{VariableRef}`: Set for O(1) membership checking of endogenous variables
 - `equations::Vector{Equation}`: Equation expressions (func + set pairs)
+- `test_constraints::Vector{TestConstraint}`: Constraints that test the solution but do not enter the solve system
 
 # Examples
 ```julia
@@ -143,13 +159,15 @@ struct Block
 	variables::Set{VariableRef}
 	_endogenous_set::Set{VariableRef}
 	equations::Vector{Equation}
+	test_constraints::Vector{TestConstraint}
 
 	function Block(
 		model::AbstractModel,
 		endogenous::Vector{VariableRef},
 		residuals::Vector{VariableRef},
 		variables::Set{VariableRef},
-		equations::Vector{Equation}
+		equations::Vector{Equation},
+		test_constraints::Vector{TestConstraint}=TestConstraint[]
 	)
 		length(equations) == length(endogenous) ||
 			error("Block must be square: got $(length(equations)) equations and $(length(endogenous)) endogenous variables")
@@ -161,16 +179,16 @@ struct Block
 			      "See non-unique mappings above.")
 		end
 
-		new(model, endogenous, residuals, variables, endogenous_set, equations)
+		new(model, endogenous, residuals, variables, endogenous_set, equations, test_constraints)
 	end
 end
 
-Block(model) = Block(model, VariableRef[], VariableRef[], Set{VariableRef}(), Equation[])
+Block(model) = Block(model, VariableRef[], VariableRef[], Set{VariableRef}(), Equation[], TestConstraint[])
 
 Base.length(b::Block) = length(b.endogenous)
 Base.iterate(b::Block) = iterate(b.endogenous)
 Base.iterate(b::Block, state) = iterate(b.endogenous, state)
-Base.copy(b::Block) = Block(b.model, copy(b.endogenous), copy(b.residuals), copy(b.variables), copy(b.equations))
+Base.copy(b::Block) = Block(b.model, copy(b.endogenous), copy(b.residuals), copy(b.variables), copy(b.equations), copy(b.test_constraints))
 
 """
     is_endogenous(var::VariableRef, b::Block) → Bool
@@ -270,15 +288,38 @@ See also: [`endogenous`](@ref), [`residuals(::AbstractModel)`](@ref)
 """
 residuals(b::Block) = b.residuals
 
+"""
+    test_constraints(b::Block) -> Vector{TestConstraint}
+
+Return the test constraints stored in `b`. Test constraints do not enter the
+square solve system. Use [`assert_test_constraints`](@ref) to test them against
+a [`ModelDictionary`](@ref).
+"""
+test_constraints(b::Block) = b.test_constraints
+
+"""
+    test_constraint_variables(b::Block) -> Vector{VariableRef}
+
+Return all variables needed to test the constraints stored in `b`. These
+variables stay separate from [`variables`](@ref) and [`exogenous`](@ref), which
+describe the square solve system.
+"""
+function test_constraint_variables(b::Block)
+	vars = Set{VariableRef}(c.variable for c in b.test_constraints)
+	foreach(c -> collect_variables!(vars, c.equation), b.test_constraints)
+	return collect(vars)
+end
+
 
 """
     variables(b::Block) → Vector{VariableRef}
 
-Return a vector of all variables that appear in the block's constraints.
+Return a vector of all variables that appear in the block's solve constraints.
 
 This includes both endogenous variables (being solved for) and exogenous variables
-(parameters to this block). Only variables that are actually used in the constraint
-expressions are included - unused indices are not present.
+(parameters to this block). It does not include variables used only by test
+constraints. Only variables that are actually used in the solve expressions are
+included - unused indices are not present.
 
 # Arguments
 - `b::Block`: The block to get variables from
@@ -286,14 +327,14 @@ expressions are included - unused indices are not present.
 # Returns
 A `Vector{VariableRef}` of all variables referenced in the block's constraints.
 
-See also: [`endogenous`](@ref), [`exogenous`](@ref)
+See also: [`endogenous`](@ref), [`exogenous`](@ref), [`test_constraint_variables`](@ref)
 """
 variables(b::Block) = collect(b.variables)
 
 """
     exogenous(b::Block) → Vector{VariableRef}
 
-Return a vector of exogenous variables that appear in the block's constraints.
+Return a vector of exogenous variables that appear in the block's solve constraints.
 
 These are variables that are referenced in the constraint expressions but are not
 endogenous (not being solved for) within this block. Only variables that are
@@ -320,7 +361,7 @@ end
 exo = exogenous(b)  # Contains y[1], y[2], y[3]
 ```
 
-See also: [`endogenous`](@ref), [`variables`](@ref)
+See also: [`endogenous`](@ref), [`variables`](@ref), [`test_constraint_variables`](@ref)
 """
 exogenous(b::Block) = collect(setdiff(b.variables, b._endogenous_set))
 
@@ -385,6 +426,7 @@ See also: [`Block`](@ref)
 function Base.summary(io::IO, b::Block)
 	n = length(b)
 	print(io, "Block with $n equations over $n variables")
+	isempty(b.test_constraints) || print(io, " and $(length(b.test_constraints)) test constraints")
 end
 
 """
@@ -493,9 +535,10 @@ function Block(
 	endogenous::AbstractArray{V},
 	residuals::AbstractArray{R},
 	variables::Set{VariableRef},
-	equations::Vector{Equation}
+	equations::Vector{Equation},
+	test_constraints::Vector{TestConstraint}=TestConstraint[]
 ) where {V<:VariableRef, R<:VariableRef}
-	Block(model, VariableRef[endogenous...], VariableRef[residuals...], variables, equations)
+	Block(model, VariableRef[endogenous...], VariableRef[residuals...], variables, equations, test_constraints)
 end
 
 function Base.:+(a::Block, b::Block)
@@ -511,15 +554,13 @@ function Base.:+(a::Block, b::Block)
 
 	combined_vars = union(a.variables, b.variables)
 	combined_eqs = vcat(a.equations, b.equations)
-	Block(a.model, vcat(a.endogenous, b.endogenous), vcat(a.residuals, b.residuals), combined_vars, combined_eqs)
+	combined_test_constraints = vcat(a.test_constraints, b.test_constraints)
+	Block(a.model, vcat(a.endogenous, b.endogenous), vcat(a.residuals, b.residuals), combined_vars, combined_eqs, combined_test_constraints)
 end
 
 function Base.:-(a::Block, b::Block)
 	a.model == b.model || error("Cannot subtract $b from $a. Blocks must belong to the same model.")
 	mask = [v ∉ b._endogenous_set for v in a.endogenous]
-	if !any(mask)
-		return Block(a.model)
-	end
 	filtered_eqs = a.equations[mask]
 
 	all_vars = Set{VariableRef}()
@@ -527,7 +568,12 @@ function Base.:-(a::Block, b::Block)
 		collect_variables!(all_vars, eq.func)
 	end
 
-	Block(a.model, a.endogenous[mask], a.residuals[mask], all_vars, filtered_eqs)
+	filtered_test_constraints = copy(a.test_constraints)
+	for constraint in b.test_constraints
+		index = findfirst(candidate -> candidate === constraint, filtered_test_constraints)
+		index === nothing || deleteat!(filtered_test_constraints, index)
+	end
+	Block(a.model, a.endogenous[mask], a.residuals[mask], all_vars, filtered_eqs, filtered_test_constraints)
 end
 
 make_residual_name(var) = string(var) * SquareModels.RESIDUAL_SUFFIX
@@ -718,15 +764,15 @@ end
 _get_model(m::AbstractModel) = m
 # _get_model for ModelDictionary is defined after ModelDictionaries.jl is included
 
-"""Split `lhs == rhs` into `(lhs - rhs)` expression at the AST level."""
-function _equality_to_diff(expr::Expr)
-	if expr.head == :call && expr.args[1] == :(==) && length(expr.args) == 3
+"""Split `lhs op rhs` into `(lhs - rhs)` at the AST level."""
+function _constraint_to_diff(expr::Expr)
+	if expr.head == :call && expr.args[1] in (:(==), :(<=), :≤, :(>=), :≥) && length(expr.args) == 3
 		lhs, rhs = expr.args[2], expr.args[3]
 		return :($lhs - ($rhs))
 	end
-	Expr(expr.head, [_equality_to_diff(a) for a in expr.args]...)
+	Expr(expr.head, [_constraint_to_diff(a) for a in expr.args]...)
 end
-_equality_to_diff(x) = x
+_constraint_to_diff(x) = x
 
 """Helper macro for Block macro - returns (endogenous, residuals, equations) where equations are vectors parallel to endogenous"""
 macro _block(container, ref_vars, constraint, extra...)
@@ -749,7 +795,7 @@ macro _block(container, ref_vars, constraint, extra...)
 	push!(code.args, :($copy_variable_ref($residual_name, $base_sym)))
 
 	transformed_constraint = _substitute_with_residual(constraint, _substitution_target(ref_vars), model_expr, residual_symbol)
-	diff_expr = _equality_to_diff(transformed_constraint)
+	diff_expr = _constraint_to_diff(transformed_constraint)
 
 	if isa(ref_vars, Symbol)
 		expression_call = Expr(:macrocall, jump_expression, __source__, :_m, diff_expr)
@@ -782,18 +828,94 @@ macro _block(container, ref_vars, constraint, extra...)
 	return esc(code)
 end
 
+"""Build indexed `TestConstraint` objects without residual variables or solve constraints."""
+macro _test_constraint(container, ref_vars, constraint, message)
+	_error(str...) = JuMP._macro_error(:test_constraint, (container, ref_vars, constraint, message), __source__, str...)
+	sm = @__MODULE__
+	jump_expression = GlobalRef(JuMP, Symbol("@expression"))
+	get_model = GlobalRef(sm, :_get_model)
+	test_constraint_ref = GlobalRef(sm, :TestConstraint)
+	equation_ref = GlobalRef(sm, :Equation)
+	all_keys_ref = GlobalRef(sm, :_all_keys)
+	index_var_ref = GlobalRef(sm, :_index_var)
+	set_ref = GlobalRef(
+		MOI,
+		constraint.args[1] in (:(<=), :≤) ? :LessThan :
+		constraint.args[1] in (:(>=), :≥) ? :GreaterThan : :EqualTo,
+	)
+	base_sym = _get_name(ref_vars)
+	model_expr = :($get_model($container))
+	diff_expr = _constraint_to_diff(constraint)
+
+	if isa(ref_vars, Symbol)
+		expression_call = Expr(:macrocall, jump_expression, __source__, :_m, diff_expr)
+		macrocall = quote
+			let _m = $model_expr
+				_func = $expression_call
+				_test_constraint = $test_constraint_ref($ref_vars, $equation_ref(_func, $set_ref(0.0)), String($message))
+				[_test_constraint]
+			end
+		end
+	elseif isexpr(ref_vars, :ref)
+		indices = ref_vars.args[2:end]
+		expression_call = Expr(:macrocall, jump_expression, __source__, :_m, Expr(:vect, indices...), diff_expr)
+		macrocall = quote
+			let _m = $model_expr
+				_exprs = $expression_call
+				_ks = $all_keys_ref(_exprs)
+				[$test_constraint_ref(
+					$index_var_ref($base_sym, k),
+					$equation_ref(_exprs[k...], $set_ref(0.0)),
+					String($message),
+				) for k in _ks]
+			end
+		end
+	else
+		_error("Reference must be a variable")
+	end
+	return esc(macrocall)
+end
+
+"""
+    @test_constraint ["message"] variable, constraint
+
+Add a constraint that tests the solution without adding an endogenous variable,
+a residual variable, or a solve constraint. The constraint can use `==`, `<=`,
+or `>=`; Unicode `≤` and `≥` also work. The optional string appears in
+[`TestConstraintError`](@ref) output.
+
+`@test_constraint` is valid only in an `@block` body. `solve` and `solve!` run
+all test constraints after a successful solve. Use
+[`assert_test_constraints`](@ref) to test a loaded or edited
+[`ModelDictionary`](@ref) without a solve.
+
+# Example
+```julia
+block = @block model begin
+    a, a == b + c
+    @test_constraint "a aggregation" a, a == sum(a_i)
+end
+```
+"""
+macro test_constraint(args...)
+	error("@test_constraint is valid only in an @block body")
+end
+
 """
     @block model begin ... end
 
 Create a `Block` of equations mapped to their endogenous variables.
 
-Each line in the block body specifies a variable (or indexed variable) followed by
-its defining equation. Equations are stored as lightweight `Equation` objects
-(expression + set) without registering JuMP constraints.
+Each standard line in the block body specifies a variable (or indexed variable)
+followed by its defining equation. Equations are stored as lightweight `Equation`
+objects (expression + set) without registering JuMP constraints. An entry that
+starts with `@test_constraint` stores a test constraint that does not enter the
+square solve system.
 
 # Arguments
 - `model`: The JuMP model (or ModelDictionary) containing the variables
-- `begin ... end`: A block where each line is `variable, equation_expr`
+- `begin ... end`: A block where each line is `variable, equation_expr` or
+  `@test_constraint ["message"] variable, equation_expr`
 
 # Returns
 A `Block` containing the equation-to-variable mappings.
@@ -835,16 +957,23 @@ macro block(model, expr)
 		"Invalid @block expression at $(line_number.file):$(line_number.line): $msg. Got $(sprint(show, it)).",
 	)
 	_is_equality(it) = isexpr(it, :call) && length(it.args) == 3 && it.args[1] == :(==)
+	_is_test_relation(it) = isexpr(it, :call) && length(it.args) == 3 && it.args[1] in (:(==), :(<=), :≤, :(>=), :≥)
 	_is_continuation(it) = isexpr(it, :call) && length(it.args) == 2 && it.args[1] in (:+, :-)
+	_macro_name(name::Symbol) = name
+	_macro_name(name::Expr) = name.head == :. && last(name.args) isa QuoteNode ? last(name.args).value : nothing
+	_is_test_constraint(it) = isexpr(it, :macrocall) && _macro_name(it.args[1]) == Symbol("@test_constraint")
 	sm = @__MODULE__
 	block_macro_ref = GlobalRef(sm, Symbol("@_block"))
+	test_constraint_macro_ref = GlobalRef(sm, Symbol("@_test_constraint"))
 	get_model_ref = GlobalRef(sm, :_get_model)
 	equation_ref = GlobalRef(sm, :Equation)
+	test_constraint_ref = GlobalRef(sm, :TestConstraint)
 	collect_variables_ref = GlobalRef(sm, :collect_variables!)
 	residuals_ref = GlobalRef(sm, :residuals)
 	line_number = expr.args[1]
 	@assert isa(line_number, LineNumberNode)
 	block_items = Tuple{LineNumberNode,Expr}[]
+	test_constraint_items = Tuple{LineNumberNode,Expr,Any}[]
 	last_tuple = nothing
 	for it in expr.args
 	    if isa(it, LineNumberNode)
@@ -854,6 +983,16 @@ macro block(model, expr)
 	        _is_equality(it.args[2]) || _error(line_number, it, "The equation must use `==`")
 	        push!(block_items, (line_number, it))
 	        last_tuple = it
+	    elseif _is_test_constraint(it)
+	        args = it.args[3:end]
+	        length(args) in (1, 2) || _error(line_number, it, "Use `@test_constraint [\"message\"] variable, equation`")
+	        message = length(args) == 2 ? first(args) : ""
+	        tuple = last(args)
+	        isexpr(tuple, :tuple) && length(tuple.args) == 2 ||
+	            _error(line_number, it, "Each test constraint must be `@test_constraint [\"message\"] variable, equation`")
+	        _is_test_relation(tuple.args[2]) || _error(line_number, it, "The test constraint must use `==`, `<=`, or `>=`")
+	        push!(test_constraint_items, (line_number, tuple, message))
+	        last_tuple = tuple
 	    elseif _is_continuation(it) && last_tuple !== nothing
 	        eq = last_tuple.args[2]
 	        eq.args[3] = Expr(:call, it.args[1], eq.args[3], it.args[2])
@@ -872,6 +1011,18 @@ macro block(model, expr)
 	    )
 	    push!(code.args, esc(macro_call))
 	end
+	test_constraint_code = Expr(:tuple)
+	for (line_number, it, message) in test_constraint_items
+	    macro_call = Expr(
+	        :macrocall,
+	        test_constraint_macro_ref,
+	        line_number,
+	        model,
+	        it.args...,
+	        message,
+	    )
+	    push!(test_constraint_code.args, esc(macro_call))
+	end
 	quote
 	    _container = $(esc(model))
 	    _model = $get_model_ref(_container)
@@ -882,11 +1033,13 @@ macro block(model, expr)
 	    endo_vec = VariableRef[endogenous...]
 	    res_vec = VariableRef[residuals...]
 	    eqs_vec = $equation_ref[eqs...]
+	    test_constraint_results = [$test_constraint_code...]
+	    test_constraints_vec = $test_constraint_ref[Iterators.flatten(test_constraint_results)...]
 	    all_vars = Set{VariableRef}()
 	    for eq in eqs_vec
 	        $collect_variables_ref(all_vars, eq)
 	    end
-	    _block = Block(_model, endo_vec, res_vec, all_vars, eqs_vec)
+	    _block = Block(_model, endo_vec, res_vec, all_vars, eqs_vec, test_constraints_vec)
 	    if _container isa ModelDictionary
 	        _container[$residuals_ref(_block)] .= 0.0
 	    end

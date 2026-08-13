@@ -8,7 +8,7 @@ using Ipopt
 
 module NoJuMPImportBlockTest
 using Test
-using SquareModels: @variables, @block, is_endogenous
+using SquareModels: @variables, @block, @test_constraint, test_constraints, test_constraint_variables, is_endogenous
 
 function run(m)
 	@variables m begin
@@ -18,10 +18,13 @@ function run(m)
 
 	b = @block m begin
 		x, x == 1
+		@test_constraint "x aggregation" x, x == 1
 		y[i ∈ 1:2], y[i] == i
 	end
 
 	@test length(b) == 3
+	@test length(test_constraints(b)) == 1
+	@test test_constraint_variables(b) == [x]
 	@test is_endogenous(x, b)
 	@test all(is_endogenous(y[i], b) for i ∈ 1:2)
 end
@@ -923,6 +926,159 @@ end
 	# Verify equations are stored - one per endogenous variable (4 total: 1 for x + 3 for y)
 	@test length(b.equations) == 4
 	@test all(isa.(b.equations, Equation))
+end
+
+@testset "@test_constraint stores and tests constraints outside the solve system" begin
+	m = Model(Ipopt.Optimizer)
+	set_silent(m)
+	industries = 1:2
+	periods = 1:2
+	JuMP.@variables m begin
+		a_i[industries, periods]
+		b_i[industries, periods]
+		c_i[industries, periods]
+		a[periods]
+		b[periods]
+		c[periods]
+		observed_a[periods]
+	end
+
+	block = @block m begin
+		a_i[i = industries, t = periods], a_i[i, t] == b_i[i, t] + c_i[i, t]
+		a[t = periods], a[t] == b[t] + c[t]
+		@test_constraint "a aggregation" a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
+		b[t = periods], b[t] == sum(b_i[i, t] for i in industries)
+		c[t = periods], c[t] == sum(c_i[i, t] for i in industries)
+	end
+
+	@test length(block) == 10
+	@test length(test_constraints(block)) == 2
+	@test length(block.equations) == length(block.endogenous) == length(block.residuals)
+	@test all(c -> c isa TestConstraint && c.message == "a aggregation", test_constraints(block))
+	@test [c.variable for c in test_constraints(block)] == collect(a)
+	@test occursin("2 test constraints", sprint(summary, block))
+
+	data = ModelDictionary(m, 0.0)
+	data[b_i] .= [1.0 3.0; 2.0 4.0]
+	data[c_i] .= [5.0 7.0; 6.0 8.0]
+	solution = solve(block, data)
+	@test assert_test_constraints(block, solution)
+
+	solution[a_i[1, 1]] += 1.0
+	err = try
+		assert_test_constraints(block, solution; msg="Block test constraints failed")
+		nothing
+	catch e
+		e
+	end
+	@test err isa TestConstraintError
+	@test err.data === solution
+	@test only(err.violations)[1] == "a[1]"
+	@test occursin("Block test constraints failed", sprint(showerror, err))
+	@test occursin("a aggregation", sprint(showerror, err))
+	solution[a_i[1, 1]] -= 1.0
+
+	m_bad = Model(Ipopt.Optimizer)
+	set_silent(m_bad)
+	@variable(m_bad, x)
+	failing_block = @block m_bad begin
+		x, x == 1
+		@test_constraint "automatic test constraint" x, x == 1.01
+	end
+	failing_data = ModelDictionary(m_bad, 0.0)
+	solve_error = try
+		solve(failing_block, failing_data)
+		nothing
+	catch e
+		e
+	end
+	@test solve_error isa TestConstraintError
+	@test solve_error.data !== failing_data
+	@test solve_error.data[x] ≈ 1 atol=1e-6
+	@test solve(failing_block, failing_data; run_test_constraints=false)[x] ≈ 1 atol=1e-6
+	@test solve(failing_block, failing_data; presolve_diagnostics=false, run_test_constraints=false)[x] ≈ 1 atol=1e-6
+	@test solve(failing_block, failing_data; test_constraint_atol=0.02)[x] ≈ 1 atol=1e-6
+	@test solve(failing_block, failing_data; test_constraint_rtol=0.02)[x] ≈ 1 atol=1e-6
+	@test_throws TestConstraintError solve!(failing_block, failing_data)
+	@test failing_data[x] ≈ 1 atol=1e-6
+
+	test_message = "observed aggregation"
+	test_constraint_only = @block m begin
+		SquareModels.@test_constraint test_message observed_a[t = periods], observed_a[t] == sum(a_i[i, t] for i in industries)
+	end
+	@test isempty(endogenous(test_constraint_only))
+	@test isempty(test_constraint_only.equations)
+	@test isempty(test_constraint_only.variables)
+	@test length(test_constraints(test_constraint_only)) == 2
+	@test all(c -> c.message == test_message, test_constraints(test_constraint_only))
+	@test Set(test_constraint_variables(test_constraint_only)) == Set(vcat(collect(observed_a), vec(collect(a_i))))
+	@test !haskey(m, :observed_a_J)
+
+	solution[observed_a] .= solution[a]
+	@test assert_test_constraints(test_constraint_only, solution)
+	@test length(test_constraints(copy(block))) == 2
+	@test length(test_constraints(block + test_constraint_only)) == 4
+	@test length(test_constraints((block + test_constraint_only) - test_constraint_only)) == 2
+
+	rebuilt_test_constraints = @block m begin
+		@test_constraint "a aggregation" a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
+	end
+	@test length(test_constraints(block + rebuilt_test_constraints)) == 4
+	@test length(test_constraints(block - rebuilt_test_constraints)) == 2
+	@test test_constraints((block + rebuilt_test_constraints) - rebuilt_test_constraints) == test_constraints(block)
+
+	different_message = @block m begin
+		@test_constraint "other aggregation" a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
+	end
+	@test length(test_constraints(block - different_message)) == 2
+
+	scaled_solution = copy(solution)
+	scaled_solution[observed_a[1]] = 1e8
+	scaled_solution[a_i[1, 1]] = 1e8
+	scaled_solution[a_i[2, 1]] = 0.5
+	@test assert_test_constraints(test_constraint_only, scaled_solution)
+	@test_throws TestConstraintError assert_test_constraints(test_constraint_only, scaled_solution; rtol=0.0)
+
+	nonfinite = @block m_bad begin
+		@test_constraint "finite failure" x, x == 2
+		@test_constraint "NaN failure" x, x == NaN
+	end
+	nonfinite_error = try
+		assert_test_constraints(nonfinite, failing_data)
+		nothing
+	catch e
+		e
+	end
+	@test nonfinite_error isa TestConstraintError
+	@test isnan(first(nonfinite_error.violations)[2])
+
+	inequalities = @block m_bad begin
+		@test_constraint "lower bound" x, x >= 0.9
+		@test_constraint "upper bound" x, x <= 1.1
+		@test_constraint "Unicode lower bound" x, x ≥ 0.9
+		@test_constraint "Unicode upper bound" x, x ≤ 1.1
+	end
+	@test assert_test_constraints(inequalities, failing_data)
+
+	failing_inequalities = @block m_bad begin
+		@test_constraint "lower bound failure" x, x >= 1.1
+		@test_constraint "upper bound failure" x, x <= 0.9
+	end
+	inequality_error = try
+		assert_test_constraints(failing_inequalities, failing_data)
+		nothing
+	catch e
+		e
+	end
+	@test inequality_error isa TestConstraintError
+	@test length(inequality_error.violations) == 2
+
+	manual_residual = @block m begin
+		@test_constraint "a aggregation with residual" a[t = periods],
+			a[t] + residual(a)[t] == sum(a_i[i, t] for i in industries)
+	end
+	@test assert_test_constraints(manual_residual, solution)
+	@test all(residual(a)[t] in test_constraint_variables(manual_residual) for t in periods)
 end
 
 @testset "@block performance" begin

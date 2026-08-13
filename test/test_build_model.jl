@@ -491,8 +491,8 @@ end
 
     @test_throws NonSquareError solve(block, data)
 
-    # skip_diagnostics allows it through (solver may still fail)
-    solve_model, var_map = _build_model(block, data; skip_diagnostics=true)
+    # Disabling pre-solve diagnostics allows it through (solver may still fail)
+    solve_model, var_map = _build_model(block, data; presolve_diagnostics=false)
     @test length(var_map) == 2
 end
 
@@ -622,8 +622,8 @@ end
 
     @test_throws NonSquareError solve(block, data)
 
-    # skip_diagnostics lets it through
-    solve_model, var_map = _build_model(block, data; skip_diagnostics=true)
+    # Disabling pre-solve diagnostics lets it through
+    solve_model, var_map = _build_model(block, data; presolve_diagnostics=false)
     @test length(var_map) == 2
 end
 

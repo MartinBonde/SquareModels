@@ -26,6 +26,7 @@ Large-scale macroeconomic models are typically "square" — each equation determ
 - **Map constraints to endogenous variables** — Each constraint is explicitly paired with the variable it determines
 - **Build models modularly** — Define separate `Block`s of equations that can be combined
 - **Swap endogenous/exogenous variables** — Use `@endo_exo_swap!` to change which variables are endogenous for calibration or counterfactual scenarios
+- **Test redundant constraints** — Add `@test_constraint` entries without adding solve constraints
 - **Inspect results** — Print, evaluate, and plot model data with `@prt`, `@evalexpr`, and `@plot`
 
 ## Quick Example
@@ -46,6 +47,7 @@ j = 1:2  # Types of labor
     L[j], "Labor demand"
     w[j], "Wage"
     Y, "Output"
+    Cj[j], "Consumption by labor type"
     C, "Consumption"
     p, "Price"
 
@@ -60,7 +62,9 @@ model_block = @block data begin
     L[j ∈ j], L[j] == μ[j] * (w[j] / p)^-σ * Y   # Labor demand
     w[j ∈ j], L[j] == ρ[j] * N[j]                 # Labor market clearing
     Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)   # Zero profit
+    Cj[j ∈ j], Cj[j] == w[j] * ρ[j] * N[j] / p    # Consumption by labor type
     C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p  # Budget constraint
+    @test_constraint "Consumption aggregation" C, C == ∑(Cj[j] for j ∈ j)
     p,        p == 1                               # Numeraire
 end
 
