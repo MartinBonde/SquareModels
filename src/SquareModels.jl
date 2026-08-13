@@ -7,7 +7,7 @@ A JuMP extension for writing modular models with square systems of equations
 """
 module SquareModels
 
-export @block, @test_constraint, Block, TestConstraint, Equation, @endo_exo_swap!, @variables, add_equation, add_equation!
+export @block, @test_constraint, Block, TestConstraint, Equation, @endo_exo_swap!, @variables, add_equation!
 export endogenous, residuals, residual, variables, exogenous, is_endogenous, overlaps, shared_endogenous
 export VariableRef  # Re-exported from JuMP for macro hygiene
 export ModelDictionary, fix, unfix, set_start_value, value, value_dict, add_missing_model_variables!
@@ -594,55 +594,14 @@ function variable_by_name(model::AbstractModel, var_name::AbstractString)
 end
 
 """
-    add_equation(model, endo::VariableRef, lhs, rhs=0)
-
-Create a Block with a single endogenous variable and its equation.
-
-Creates a residual variable (fixed to 0) and the equation `lhs + resid == rhs`.
-The residual follows the standard naming convention (endo name + RESIDUAL_SUFFIX).
-
-This is the runtime equivalent of a single line in a `@block` macro - use it when you
-need to programmatically add endogenous/equation pairs with runtime variable references.
-
-# Arguments
-- `model`: The JuMP model (or ModelDictionary)
-- `endo::VariableRef`: The variable to make endogenous
-- `lhs`: Left-hand side expression
-- `rhs`: Right-hand side (defaults to 0)
-
-# Returns
-A Block containing the endogenous/equation pair, which can be merged with other blocks using `+`.
-
-# Examples
-```julia
-block = block + add_equation(model, x[t], x[t], x[t+1])    # x[t] == x[t+1]
-block = block + add_equation(model, x[t], x[t] - x[t+1])   # x[t] - x[t+1] == 0
-```
-"""
-function add_equation(model, endo::VariableRef, lhs, rhs=0)
-	m = _get_model(model)
-	var_name = name(endo)
-
-	resid = @variable(m, base_name = make_residual_name(var_name))
-	fix(resid, 0)
-
-	eq = Equation(lhs - rhs + resid, MOI.EqualTo(0.0))
-
-	all_vars = Set{VariableRef}([endo, resid])
-	collect_variables!(all_vars, lhs)
-	collect_variables!(all_vars, rhs)
-
-	Block(m, [endo], [resid], all_vars, Equation[eq])
-end
-
-"""
     add_equation!(block::Block, endo::VariableRef, lhs, rhs=0) → Block
 
 Add an endogenous variable and its equation to `block` in place.
 
-Like [`add_equation`](@ref), this creates and fixes a residual variable and
-stores the equation `lhs + residual == rhs`. An error is thrown if `endo` is
-already endogenous in the block.
+This creates and fixes a residual variable. If `endo` occurs in the equation,
+the residual adjusts its first stored occurrence. If `endo` does not occur, the
+equation becomes `lhs == rhs + residual`. An error is thrown if `endo` is already
+endogenous in the block.
 
 # Example
 ```julia
@@ -652,11 +611,12 @@ add_equation!(block, x, x, 1)
 """
 function add_equation!(block::Block, endo::VariableRef, lhs, rhs=0)
 	endo ∉ block._endogenous_set || error("Cannot add equation: $(name(endo)) is already endogenous in this block.")
-	eq_block = add_equation(block.model, endo, lhs, rhs)
-	append!(block.endogenous, eq_block.endogenous)
-	append!(block.residuals, eq_block.residuals)
-	append!(block.equations, eq_block.equations)
-	union!(block.variables, eq_block.variables)
+	resid = _residual_for(endo)
+	eq = _equation_with_residual(endo, resid, lhs, rhs)
+	push!(block.endogenous, endo)
+	push!(block.residuals, resid)
+	push!(block.equations, eq)
+	collect_variables!(block.variables, eq)
 	push!(block._endogenous_set, endo)
 	return block
 end
@@ -665,79 +625,57 @@ end
 _get_name(s::Symbol) = s
 _get_name(e::Expr) = e.args[1]
 
-_index_symbol(spec::Symbol) = spec
-function _index_symbol(spec::Expr)
-	if spec.head in (:(=), :kw)
-		spec.args[1]
-	elseif spec.head == :call && spec.args[1] in (:∈, :in)
-		spec.args[2]
-	else
-		spec
+"""Return `expr` with `resid` added at its first stored occurrence of `endo`."""
+_with_residual(expr, endo::VariableRef, resid::VariableRef) = (expr, false)
+
+_with_residual(expr::VariableRef, endo::VariableRef, resid::VariableRef) =
+	expr == endo ? (expr + resid, true) : (expr, false)
+
+function _with_residual(expr::AffExpr, endo::VariableRef, resid::VariableRef)
+	coef = get(expr.terms, endo, 0.0)
+	iszero(coef) && return expr, false
+	return expr + coef * resid, true
+end
+
+function _with_residual(expr::QuadExpr, endo::VariableRef, resid::VariableRef)
+	for (pair, coef) in expr.terms
+		iszero(coef) && continue
+		pair.a == endo && pair.b == endo &&
+			return expr + coef * (2 * endo * resid + resid^2), true
+		pair.a == endo && return expr + coef * resid * pair.b, true
+		pair.b == endo && return expr + coef * pair.a * resid, true
 	end
+	new_aff, found = _with_residual(expr.aff, endo, resid)
+	found || return expr, false
+	return QuadExpr(new_aff, copy(expr.terms)), true
 end
 
-"""
-Build the substitution target AST from the block's ref_vars specification.
-`x[t ∈ 2:3, s ∈ 1:2]` → `:(x[t, s])`, scalar `x` → `:x`.
-Tuple destructuring `x[(i,d) = keys, t ∈ 1:3]` → `:(x[i, d, t])` (flattened).
-Semicolon conditions `x[i ∈ 1:3; cond]` → `:(x[i])` (condition stripped).
-"""
-function _substitution_target(ref_vars)
-	base_sym = _get_name(ref_vars)
-	if isexpr(ref_vars, :ref)
-		index_symbols = Any[]
-		for spec in ref_vars.args[2:end]
-			isexpr(spec, :parameters) && continue
-			sym = _index_symbol(spec)
-			if isexpr(sym, :tuple)
-				append!(index_symbols, sym.args)
-			else
-				push!(index_symbols, sym)
-			end
-		end
-		Expr(:ref, base_sym, index_symbols...)
-	else
-		base_sym
+function _with_residual(expr::NonlinearExpr, endo::VariableRef, resid::VariableRef)
+	new_args = copy(expr.args)
+	for i in eachindex(new_args)
+		new_args[i], found = _with_residual(new_args[i], endo, resid)
+		found && return NonlinearExpr(expr.head, new_args), true
 	end
+	return expr, false
 end
 
-"""
-Replace occurrences of `target` in `expr` with `(target + model[residual_sym][indices])`.
-Handles both scalar references like `x` and indexed references like `x[i,j]`.
-"""
-_substitute_with_residual(expr, target, model_sym, residual_sym::Symbol) = expr
-
-function _substitute_with_residual(expr::Symbol, target::Symbol, model_sym, residual_sym::Symbol)
-	expr == target ? :($expr + $model_sym[$(QuoteNode(residual_sym))]) : expr
+"""Build an equation with one residual insertion for both `@block` and `add_equation!`."""
+function _equation_with_residual(endo::VariableRef, resid::VariableRef, lhs, rhs)
+	new_lhs, found = _with_residual(lhs, endo, resid)
+	found && return Equation(new_lhs - rhs, MOI.EqualTo(0.0))
+	new_rhs, found = _with_residual(rhs, endo, resid)
+	return Equation(found ? lhs - new_rhs : lhs - rhs - resid, MOI.EqualTo(0.0))
 end
 
-_is_ref_match(expr::Expr, target::Symbol) = expr.head == :ref && expr.args[1] == target
-function _is_ref_match(expr::Expr, target::Expr)
-	expr.head == :ref || return false
-	expr == target && return true
-	_flatten_ref(expr) == _flatten_ref(target)
-end
-
-"""Flatten tuple indices in a :ref expression for comparison.
-`:(x[(i,d), t])` → `:(x[i, d, t])`"""
-function _flatten_ref(e::Expr)
-	e.head == :ref || return e
-	args = Any[e.args[1]]
-	for a in e.args[2:end]
-		isexpr(a, :tuple) ? append!(args, a.args) : push!(args, a)
-	end
-	Expr(:ref, args...)
-end
-
-function _substitute_with_residual(expr::Expr, target, model_sym, residual_sym::Symbol)
-	if _is_ref_match(expr, target)
-		indices = expr.args[2:end]
-		residual_access = Expr(:ref, :($model_sym[$(QuoteNode(residual_sym))]), indices...)
-		:($expr + $residual_access)
-	else
-		new_args = [_substitute_with_residual(arg, target, model_sym, residual_sym) for arg in expr.args]
-		Expr(expr.head, new_args...)
-	end
+"""Create the residual container for `endo` when needed and return its matching item."""
+function _residual_for(endo::VariableRef)
+	m = endo.model
+	base, indices = split_name(endo)
+	residual_base = make_residual_name(base)
+	haskey(m, Symbol(residual_base)) || copy_variable(residual_base, m[Symbol(base)])
+	resid = variable_by_name(m, residual_base * indices)
+	resid === nothing && error("Cannot find residual for $(name(endo))")
+	return resid
 end
 
 """Collect index tuples from a JuMP container in iteration order."""
@@ -780,44 +718,46 @@ macro _block(container, ref_vars, constraint, extra...)
 	sm = @__MODULE__
 	jump_expression = GlobalRef(JuMP, Symbol("@expression"))
 	get_model = GlobalRef(sm, :_get_model)
-	copy_variable_ref = GlobalRef(sm, :copy_variable)
+	residual_for_ref = GlobalRef(sm, :_residual_for)
 	equation_ref = GlobalRef(sm, :Equation)
+	equation_with_residual_ref = GlobalRef(sm, :_equation_with_residual)
 	all_keys_ref = GlobalRef(sm, :_all_keys)
 	index_var_ref = GlobalRef(sm, :_index_var)
-	equal_to_ref = GlobalRef(MOI, :EqualTo)
 	code = Expr(:block)
 	base_sym = _get_name(ref_vars)
-	residual_name = make_residual_name(base_sym)
-	residual_symbol = Symbol(residual_name)
 
 	model_expr = :($get_model($container))
 
-	push!(code.args, :($copy_variable_ref($residual_name, $base_sym)))
-
-	transformed_constraint = _substitute_with_residual(constraint, _substitution_target(ref_vars), model_expr, residual_symbol)
-	diff_expr = _constraint_to_diff(transformed_constraint)
+	lhs, rhs = constraint.args[2], constraint.args[3]
 
 	if isa(ref_vars, Symbol)
-		expression_call = Expr(:macrocall, jump_expression, __source__, :_m, diff_expr)
+		lhs_call = Expr(:macrocall, jump_expression, __source__, :_m, lhs)
+		rhs_call = Expr(:macrocall, jump_expression, __source__, :_m, rhs)
 		macrocall = quote
 			let _m = $model_expr
-				_func = $expression_call
 				endo = $ref_vars
-				resid = _m[$(QuoteNode(residual_symbol))]
-				eqs = $equation_ref[$equation_ref(_func, $equal_to_ref(0.0))]
+				resid = $residual_for_ref(endo)
+				eqs = $equation_ref[$equation_with_residual_ref(endo, resid, $lhs_call, $rhs_call)]
 				([endo], [resid], eqs)
 			end
 		end
 	elseif isexpr(ref_vars, :ref)
 		indices = ref_vars.args[2:end]
-		expression_call = Expr(:macrocall, jump_expression, __source__, :_m, Expr(:vect, indices...), diff_expr)
+		lhs_call = Expr(:macrocall, jump_expression, __source__, :_m, Expr(:vect, indices...), lhs)
+		rhs_call = Expr(:macrocall, jump_expression, __source__, :_m, Expr(:vect, indices...), rhs)
 		macrocall = quote
 			let _m = $model_expr
-				_exprs = $expression_call
-				_ks = $all_keys_ref(_exprs)
+				_lhs = $lhs_call
+				_rhs = $rhs_call
+				_ks = $all_keys_ref(_lhs)
 				endos = [$index_var_ref($base_sym, k) for k in _ks]
-				resids = [$index_var_ref(_m[$(QuoteNode(residual_symbol))], k) for k in _ks]
-				eqs = $equation_ref[$equation_ref(_exprs[k...], $equal_to_ref(0.0)) for k in _ks]
+				resids = [$residual_for_ref(endo) for endo in endos]
+				eqs = $equation_ref[$equation_with_residual_ref(
+					endo,
+					resid,
+					_lhs[k...],
+					_rhs[k...],
+				) for (k, endo, resid) in zip(_ks, endos, resids)]
 				(endos, resids, eqs)
 			end
 		end
@@ -911,6 +851,10 @@ followed by its defining equation. Equations are stored as lightweight `Equation
 objects (expression + set) without registering JuMP constraints. An entry that
 starts with `@test_constraint` stores a test constraint that does not enter the
 square solve system.
+
+SquareModels adds the residual at the first stored occurrence of the mapped
+variable. It adds the residual only once. If the variable is absent, it adds the
+unscaled residual to the right-hand side.
 
 # Arguments
 - `model`: The JuMP model (or ModelDictionary) containing the variables

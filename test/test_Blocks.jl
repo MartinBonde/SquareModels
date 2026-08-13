@@ -820,6 +820,48 @@ end
 			@test all(result[m[:b_J][i]] ≈ 2 for i in 1:2)
 		end
 
+		@testset "Residual adjusts only the first stored occurrence" begin
+			m = Model(Ipopt.Optimizer)
+			set_silent(m)
+			JuMP.@variables m begin
+				x
+				a
+				b
+			end
+			block = @block m begin
+				x, x * a == x * b
+			end
+			db = ModelDictionary(m)
+			db[x] = 2.0
+			db[a] = 3.0
+			db[b] = 5.0
+			db[m[:x_J]] = 0.0
+			@endo_exo_swap!(block, m[:x_J], x)
+			result = solve(block, db)
+			@test result[m[:x_J]] ≈ 4 / 3 atol=1e-6
+		end
+
+		@testset "Absent endogenous variable uses an unscaled equation residual" begin
+			m = Model(Ipopt.Optimizer)
+			set_silent(m)
+			JuMP.@variables m begin
+				price
+				demand
+				supply
+			end
+			block = @block m begin
+				price, demand == supply
+			end
+			db = ModelDictionary(m)
+			db[price] = 0.0
+			db[demand] = 12.0
+			db[supply] = 10.0
+			db[m[:price_J]] = 0.0
+			@endo_exo_swap!(block, m[:price_J], price)
+			result = solve(block, db)
+			@test result[m[:price_J]] ≈ 2 atol=1e-6
+		end
+
 		@testset "Endo in complex expression (power)" begin
 			m = Model(Ipopt.Optimizer)
 			set_silent(m)
@@ -832,7 +874,7 @@ end
 			db[c] .= 0.0; db[m[:c_J]] .= 2.0
 			@endo_exo_swap!(b4, m[:c_J], c)
 			result = solve(b4, db)
-			@test all(result[m[:c_J][i]] ≈ 2 for i in 1:2)
+			@test all(result[m[:c_J][i]] ≈ sqrt(6) for i in 1:2)
 		end
 
 		@testset "Endo on RHS" begin
