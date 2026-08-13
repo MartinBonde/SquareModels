@@ -91,30 +91,6 @@ solve!(model_block, scenario)
 println("Multipliers: ", scenario ./ baseline .- 1)
 ```
 
-## Test Constraints
-
-Use `@test_constraint` for a constraint that must hold but must not determine an
-endogenous variable. Test constraints can use `==`, `<=`, or `>=`. They do not
-add residual variables or solve constraints.
-
-```julia
-block = @block data begin
-    a_i[i ∈ industries, t ∈ periods], a_i[i, t] == b_i[i, t] + c_i[i, t]
-    a[t ∈ periods], a[t] == b[t] + c[t]
-    @test_constraint "a aggregation" a[t ∈ periods], a[t] == ∑(a_i[i, t] for i ∈ industries)
-    b[t ∈ periods], b[t] == ∑(b_i[i, t] for i ∈ industries)
-    c[t ∈ periods], c[t] == ∑(c_i[i, t] for i ∈ industries)
-end
-
-solution = solve(block, data)
-```
-
-`solve` and `solve!` run the test constraints after a successful solve. Set
-`run_test_constraints=false` to skip them. The default tolerances are
-`test_constraint_atol=1e-6` and `test_constraint_rtol=1e-8`. Use
-`assert_test_constraints` to test a loaded or edited `ModelDictionary`, and use
-`test_constraint_variables` to find data that only the tests need.
-
 ## Documentation
 
 The [documentation pages](https://martinbonde.github.io/SquareModels.jl) cover:
