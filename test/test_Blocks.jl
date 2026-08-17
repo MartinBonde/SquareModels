@@ -1245,6 +1245,23 @@ end
 	end
 end
 
+@testset "@block with a filtered tuple-key index" begin
+	m = Model()
+	pairs = Set([(:a, 1), (:a, 2), (:b, 2), (:b, 3)])
+	SquareModels.@variables m begin
+		x[a=[:a, :b], t=1:3; (a, t) in pairs]
+	end
+
+	b = @block m begin
+		x[(a, t) in keys(x); t in 2:3], x[a, t] == t
+		@test_constraint "Filtered tuple keys" x[(a, t) in keys(x); t in 2:3], x[a, t] == t
+	end
+
+	@test length(b) == 3
+	@test Set(endogenous(b)) == Set([x[:a, 2], x[:b, 2], x[:b, 3]])
+	@test length(test_constraints(b)) == 3
+end
+
 @testset "add_equation!" begin
 	m = Model(Ipopt.Optimizer)
 	JuMP.@variables m begin

@@ -741,10 +741,10 @@ macro _block(container, ref_vars, constraint, extra...)
 				([endo], [resid], eqs)
 			end
 		end
-	elseif isexpr(ref_vars, :ref)
-		indices = ref_vars.args[2:end]
-		lhs_call = Expr(:macrocall, jump_expression, __source__, :_m, Expr(:vect, indices...), lhs)
-		rhs_call = Expr(:macrocall, jump_expression, __source__, :_m, Expr(:vect, indices...), rhs)
+	elseif isexpr(ref_vars, :ref) || isexpr(ref_vars, :typed_vcat)
+		indices = Expr(isexpr(ref_vars, :ref) ? :vect : :vcat, ref_vars.args[2:end]...)
+		lhs_call = Expr(:macrocall, jump_expression, __source__, :_m, indices, lhs)
+		rhs_call = Expr(:macrocall, jump_expression, __source__, :_m, indices, rhs)
 		macrocall = quote
 			let _m = $model_expr
 				_lhs = $lhs_call
@@ -796,9 +796,9 @@ macro _test_constraint(container, ref_vars, constraint, message)
 				[_test_constraint]
 			end
 		end
-	elseif isexpr(ref_vars, :ref)
-		indices = ref_vars.args[2:end]
-		expression_call = Expr(:macrocall, jump_expression, __source__, :_m, Expr(:vect, indices...), diff_expr)
+	elseif isexpr(ref_vars, :ref) || isexpr(ref_vars, :typed_vcat)
+		indices = Expr(isexpr(ref_vars, :ref) ? :vect : :vcat, ref_vars.args[2:end]...)
+		expression_call = Expr(:macrocall, jump_expression, __source__, :_m, indices, diff_expr)
 		macrocall = quote
 			let _m = $model_expr
 				_exprs = $expression_call
@@ -891,6 +891,17 @@ w[1] ∈ my_block   # true
 
 b = @block model begin
     z[i ∈ 1:2, j ∈ [:a, :b]], z[i,j] == i
+end
+```
+
+```julia
+# Use a variable's sparse keys and add the standard JuMP filter after `;`.
+active = Set([(1, :a), (2, :a), (2, :b)])
+@variables model begin
+    z_sparse[i = 1:2, j = [:a, :b]; (i, j) in active]
+end
+b = @block model begin
+    z_sparse[(i, j) in keys(z_sparse); i == 2], z_sparse[i, j] == i
 end
 ```
 

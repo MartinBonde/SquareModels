@@ -10,6 +10,7 @@ using Ipopt
     @test z + 1 === 1
     @test 1 + z === 1
     @test z + z === z
+    @test z * z === z
     @test z * 5 === z
     @test 5 * z === z
     @test -z === z
