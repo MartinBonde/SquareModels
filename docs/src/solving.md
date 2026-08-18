@@ -75,12 +75,26 @@ the model but has no data value yet.
 
 After a successful solve, `solve` and `solve!` run each `@test_constraint` entry
 in the block. Test constraints can use `==`, `<=`, or `>=` and do not enter the
-solve model. Set their tolerances with `test_constraint_atol` and
+solve model. Set the default tolerances with `test_constraint_atol` and
 `test_constraint_rtol` (defaults: `1e-6` and `1e-8`):
 
 ```julia
 solution = solve(block, data; test_constraint_atol=1e-8, test_constraint_rtol=1e-6)
 ```
+
+Set a tolerance for one test in its macro call:
+
+```julia
+block = @block data begin
+    @test_constraint("a aggregation"; atol=1e-10, rtol=1e-7)
+    a[t ∈ periods], a[t] == ∑(a_i[i, t] for i ∈ industries)
+end
+```
+
+The macro `atol` and `rtol` values replace the matching solve default for this
+test. You can set one or both. The test passes when its gap is at most
+`max(atol, rtol * abs(data[a[t]]))`. The mapped variable sets the relative
+tolerance scale.
 
 Set `run_test_constraints=false` for a partial solve that does not yet meet all
 test constraints. If one fails after `solve!`, the dictionary keeps the solved

@@ -32,7 +32,8 @@ another endogenous variable:
 block = @block data begin
     a_i[i ∈ industries, t ∈ periods], a_i[i, t] == b_i[i, t] + c_i[i, t]
     a[t ∈ periods], a[t] == b[t] + c[t]
-    @test_constraint "a aggregation" a[t ∈ periods], a[t] == ∑(a_i[i, t] for i ∈ industries)
+    @test_constraint("a aggregation")
+    a[t ∈ periods], a[t] == ∑(a_i[i, t] for i ∈ industries)
     b[t ∈ periods], b[t] == ∑(b_i[i, t] for i ∈ industries)
     c[t ∈ periods], c[t] == ∑(c_i[i, t] for i ∈ industries)
 end
@@ -52,7 +53,8 @@ the solve equation absorbs:
 ```julia
 block = @block data begin
     a[t ∈ periods], a[t] == b[t] + c[t]
-    @test_constraint "a aggregation with residual" a[t ∈ periods],
+    @test_constraint("a aggregation with residual")
+    a[t ∈ periods],
         a[t] + residual(a)[t] == ∑(a_i[i, t] for i ∈ industries)
 end
 ```
@@ -60,12 +62,30 @@ end
 Here, `residual(a)` returns the residual that the solve equation for `a` creates.
 Omit it when the test must compare the reported value of `a` itself.
 
-Set `run_test_constraints=false` to skip them. Use `test_constraint_atol` and
-`test_constraint_rtol` to set their tolerances (defaults: `1e-6` and `1e-8`). Use
+Use `atol` and `rtol` to set a tolerance for one test constraint:
+
+```julia
+block = @block data begin
+    @test_constraint("a aggregation"; atol=1e-8, rtol=1e-6)
+    a[t ∈ periods], a[t] == ∑(a_i[i, t] for i ∈ industries)
+end
+```
+
+The macro call must be a separate statement directly before the entry. You can
+remove the macro call without changing the variable or equation.
+
+The test passes when the gap is at most
+`max(atol, rtol * abs(data[a[t]]))`. The mapped variable, `a[t]` in this
+example, sets the scale for the relative tolerance. If you omit a keyword, the
+test uses the value from `test_constraint_atol` or `test_constraint_rtol` in
+`solve` or `solve!`. These defaults are `1e-6` and `1e-8`.
+
+Set `run_test_constraints=false` to skip all tests. Use
 [`assert_test_constraints`](@ref) to test a loaded or edited `ModelDictionary`
-without a solve. [`test_constraint_variables`](@ref) returns the variables that
-the tests need. These variables stay out of [`variables`](@ref) and
-[`exogenous`](@ref) unless a solve constraint also uses them.
+without a solve. Its `atol` and `rtol` values act as the defaults in the same
+way. [`test_constraint_variables`](@ref) returns the variables that the tests
+need. These variables stay out of [`variables`](@ref) and [`exogenous`](@ref)
+unless a solve constraint also uses them.
 
 ## Endo-Exo Swapping
 
