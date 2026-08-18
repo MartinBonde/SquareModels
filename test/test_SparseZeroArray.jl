@@ -89,9 +89,44 @@ end
     domain = (Set(1:3), Set([:a, :b]))
     sz = SparseZeroArray(x, domain)
 
-    # Colon slicing delegates to underlying SparseAxisArray
-    slice = sz[:, :a]
-    @test length(slice) == 3
+    slice_a = sz[:, :a]
+    @test slice_a isa SparseZeroArray
+    @test length(slice_a) == 3
+    @test Set(keys(slice_a)) == Set([(1,), (2,), (3,)])
+
+    slice_b = sz[:, :b]
+    @test slice_b isa SparseZeroArray
+    @test length(slice_b) == 2
+    @test slice_b[3] isa SquareModels.Zero
+    @test_throws ErrorException sz[:, [:a, :c]]
+
+    for k in eachindex(sz)
+        @test sz[k] === sz[k...]
+    end
+    for k in eachindex(slice_b)
+        @test slice_b[k] === slice_b[k...]
+    end
+    @test sz[i=1, j=:a] === sz[1, :a]
+    @test sz[i=3, j=:b] isa SquareModels.Zero
+
+    block = @block m begin
+        slice_a[i = 1:3], slice_a[i] == i
+    end
+    @test all(is_endogenous(x[i, :a], block) for i in 1:3)
+
+    data = ModelDictionary(m)
+    data[slice_b] .= 2.0
+    @test all(data[x[i, :b]] == 2.0 for i in 1:2)
+
+    multi = SparseZeroArray(
+        SparseAxisArray(Dict((1, 1, 1, 1) => 10.0, (2, 1, 2, 2) => 20.0)),
+        ntuple(_ -> Set(1:2), 4),
+    )
+    multi_slice = multi[:, :, 1, :]
+    @test multi_slice isa SparseZeroArray
+    @test multi_slice.domain == ntuple(_ -> Set(1:2), 3)
+    @test multi_slice[1, 1, 1] == 10.0
+    @test multi_slice[2, 2, 2] isa SquareModels.Zero
 end
 
 @testset "SparseZeroArray forwarded methods" begin
@@ -111,6 +146,73 @@ end
     end
     @test vals isa Vector{VariableRef}
     @test length(vals) == length(sz)
+end
+
+@testset "SparseZeroArray matches SparseAxisArray except Zero()" begin
+    data = Dict((1, :a) => 10.0, (2, :a) => 20.0, (1, :b) => 30.0)
+    saa = SparseAxisArray(data)
+    sz = SparseZeroArray(saa, (Set(1:3), Set([:a, :b])))
+
+    @test sz[1, :a] == saa[1, :a]
+    @test sz[(2, :a)] == saa[(2, :a)]
+    @test_throws KeyError saa[3, :a]
+    @test sz[3, :a] isa SquareModels.Zero
+
+    slice_sz = sz[:, :a]
+    slice_saa = saa[:, :a]
+    @test Set(eachindex(slice_sz)) == Set(eachindex(slice_saa))
+    for k in eachindex(slice_sz)
+        @test slice_sz[k] == slice_saa[k]
+    end
+    @test slice_sz[3] isa SquareModels.Zero
+
+    r_sz = slice_sz .* 2
+    r_saa = slice_saa .* 2
+    @test r_sz isa SparseZeroArray
+    @test r_sz.data == r_saa
+    @test r_sz[1] == 20.0
+    @test r_sz[3] isa SquareModels.Zero
+    @test (sz[:, :a] .+ sz[:, :a]) isa SparseZeroArray
+    @test_throws ArgumentError slice_sz .+ 1
+    @test_throws ArgumentError iszero.(slice_sz)
+    @test_throws ArgumentError slice_sz .^ 2
+    @test_throws ArgumentError sqrt.(slice_sz)
+    @test_throws ArgumentError 1 ./ slice_sz
+
+    mixed = slice_sz .+ slice_saa
+    @test mixed isa SparseZeroArray
+    @test mixed.data == slice_saa .+ slice_saa
+    @test mixed[3] isa SquareModels.Zero
+    @test_throws ArgumentError slice_sz .+ SparseAxisArray(Dict((1,) => 1.0))
+
+    full_saa = SparseAxisArray(Dict((1,) => 10.0, (2,) => 20.0))
+    full_sz = SparseZeroArray(full_saa, (Set(1:2),))
+    shifted = full_sz .+ 1
+    @test shifted isa SparseZeroArray
+    @test shifted[1] == 11.0
+    @test shifted[2] == 21.0
+
+    short_domain = SparseZeroArray(
+        SparseAxisArray(Dict((1,) => 10.0, (2,) => 20.0)),
+        (Set(1:3),),
+    )
+    long_domain = SparseZeroArray(
+        SparseAxisArray(Dict((1,) => 10.0, (2,) => 20.0)),
+        (Set(1:4),),
+    )
+    @test_throws ArgumentError short_domain .+ long_domain
+    @test_throws ArgumentError long_domain .+ short_domain
+
+    sim = similar(sz, Float64)
+    @test sim isa SparseZeroArray
+    @test isempty(sim)
+    @test sim[1, :a] isa SquareModels.Zero
+
+    sz[3, :a] = 40.0
+    @test sz[3, :a] == 40.0
+    @test sz[(3, :a)] == 40.0
+    @test_throws ErrorException sz[4, :a] = 1.0
+    @test_throws ArgumentError sz[:, :a] = 1.0
 end
 
 @testset "SparseZeroArray sum with ∑" begin
