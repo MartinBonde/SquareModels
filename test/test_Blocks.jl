@@ -18,7 +18,8 @@ function run(m)
 
 	b = @block m begin
 		x, x == 1
-		@test_constraint "x aggregation" x, x == 1
+		@test_constraint("x aggregation")
+		x, x == 1
 		y[i ∈ 1:2], y[i] == i
 	end
 
@@ -178,6 +179,12 @@ end
 	@test_throws Meta.ParseError Meta.parse("""
 		@block m begin
 			// wrong comment
+		end
+	""")
+
+	@test_throws Meta.ParseError Meta.parse("""
+		@block m begin
+			@test_constraint("message"; atol=1e-8) x, x == 1
 		end
 	""")
 end
@@ -988,7 +995,8 @@ end
 	block = @block m begin
 		a_i[i = industries, t = periods], a_i[i, t] == b_i[i, t] + c_i[i, t]
 		a[t = periods], a[t] == b[t] + c[t]
-		@test_constraint "a aggregation" a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
+		@test_constraint("a aggregation")
+		a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
 		b[t = periods], b[t] == sum(b_i[i, t] for i in industries)
 		c[t = periods], c[t] == sum(c_i[i, t] for i in industries)
 	end
@@ -1025,7 +1033,8 @@ end
 	@variable(m_bad, x)
 	failing_block = @block m_bad begin
 		x, x == 1
-		@test_constraint "automatic test constraint" x, x == 1.01
+		@test_constraint("automatic test constraint")
+		x, x == 1.01
 	end
 	failing_data = ModelDictionary(m_bad, 0.0)
 	solve_error = try
@@ -1044,9 +1053,36 @@ end
 	@test_throws TestConstraintError solve!(failing_block, failing_data)
 	@test failing_data[x] ≈ 1 atol=1e-6
 
+	custom_atol = 0.02
+	custom_tolerances = @block m_bad begin
+		@test_constraint(; atol=custom_atol)
+		x, x == 1.01
+		@test_constraint("relative tolerance"; rtol=0.02)
+		x, x == 1.01
+	end
+	@test isempty(first(test_constraints(custom_tolerances)).message)
+	@test first(test_constraints(custom_tolerances)).atol == custom_atol
+	@test first(test_constraints(custom_tolerances)).rtol === nothing
+	@test last(test_constraints(custom_tolerances)).atol === nothing
+	@test last(test_constraints(custom_tolerances)).rtol == 0.02
+	@test assert_test_constraints(custom_tolerances, failing_data; atol=0, rtol=0)
+
+	legacy_syntax = @block m_bad begin
+		@test_constraint "legacy syntax" x, x == 1
+	end
+	@test only(test_constraints(legacy_syntax)).message == "legacy syntax"
+
+	semicolon_syntax = @block m_bad begin
+		@test_constraint("semicolon syntax"; atol=0.02); x, x == 1.01
+	end
+	@test only(test_constraints(semicolon_syntax)).message == "semicolon syntax"
+	@test only(test_constraints(semicolon_syntax)).atol == 0.02
+	@test assert_test_constraints(semicolon_syntax, failing_data; atol=0, rtol=0)
+
 	test_message = "observed aggregation"
 	test_constraint_only = @block m begin
-		SquareModels.@test_constraint test_message observed_a[t = periods], observed_a[t] == sum(a_i[i, t] for i in industries)
+		SquareModels.@test_constraint(test_message)
+		observed_a[t = periods], observed_a[t] == sum(a_i[i, t] for i in industries)
 	end
 	@test isempty(endogenous(test_constraint_only))
 	@test isempty(test_constraint_only.equations)
@@ -1063,14 +1099,16 @@ end
 	@test length(test_constraints((block + test_constraint_only) - test_constraint_only)) == 2
 
 	rebuilt_test_constraints = @block m begin
-		@test_constraint "a aggregation" a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
+		@test_constraint("a aggregation")
+		a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
 	end
 	@test length(test_constraints(block + rebuilt_test_constraints)) == 4
 	@test length(test_constraints(block - rebuilt_test_constraints)) == 2
 	@test test_constraints((block + rebuilt_test_constraints) - rebuilt_test_constraints) == test_constraints(block)
 
 	different_message = @block m begin
-		@test_constraint "other aggregation" a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
+		@test_constraint("other aggregation")
+		a[t = periods], a[t] == sum(a_i[i, t] for i in industries)
 	end
 	@test length(test_constraints(block - different_message)) == 2
 
@@ -1082,8 +1120,10 @@ end
 	@test_throws TestConstraintError assert_test_constraints(test_constraint_only, scaled_solution; rtol=0.0)
 
 	nonfinite = @block m_bad begin
-		@test_constraint "finite failure" x, x == 2
-		@test_constraint "NaN failure" x, x == NaN
+		@test_constraint("finite failure")
+		x, x == 2
+		@test_constraint("NaN failure")
+		x, x == NaN
 	end
 	nonfinite_error = try
 		assert_test_constraints(nonfinite, failing_data)
@@ -1095,16 +1135,22 @@ end
 	@test isnan(first(nonfinite_error.violations)[2])
 
 	inequalities = @block m_bad begin
-		@test_constraint "lower bound" x, x >= 0.9
-		@test_constraint "upper bound" x, x <= 1.1
-		@test_constraint "Unicode lower bound" x, x ≥ 0.9
-		@test_constraint "Unicode upper bound" x, x ≤ 1.1
+		@test_constraint("lower bound")
+		x, x >= 0.9
+		@test_constraint("upper bound")
+		x, x <= 1.1
+		@test_constraint("Unicode lower bound")
+		x, x ≥ 0.9
+		@test_constraint("Unicode upper bound")
+		x, x ≤ 1.1
 	end
 	@test assert_test_constraints(inequalities, failing_data)
 
 	failing_inequalities = @block m_bad begin
-		@test_constraint "lower bound failure" x, x >= 1.1
-		@test_constraint "upper bound failure" x, x <= 0.9
+		@test_constraint("lower bound failure")
+		x, x >= 1.1
+		@test_constraint("upper bound failure")
+		x, x <= 0.9
 	end
 	inequality_error = try
 		assert_test_constraints(failing_inequalities, failing_data)
@@ -1116,7 +1162,8 @@ end
 	@test length(inequality_error.violations) == 2
 
 	manual_residual = @block m begin
-		@test_constraint "a aggregation with residual" a[t = periods],
+		@test_constraint("a aggregation with residual")
+		a[t = periods],
 			a[t] + residual(a)[t] == sum(a_i[i, t] for i in industries)
 	end
 	@test assert_test_constraints(manual_residual, solution)
@@ -1254,7 +1301,8 @@ end
 
 	b = @block m begin
 		x[(a, t) in keys(x); t in 2:3], x[a, t] == t
-		@test_constraint "Filtered tuple keys" x[(a, t) in keys(x); t in 2:3], x[a, t] == t
+		@test_constraint("Filtered tuple keys")
+		x[(a, t) in keys(x); t in 2:3], x[a, t] == t
 	end
 
 	@test length(b) == 3

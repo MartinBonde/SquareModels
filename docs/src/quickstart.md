@@ -45,7 +45,8 @@ model_block = @block data begin
     Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)
     Cj[j ∈ j], Cj[j] == w[j] * ρ[j] * N[j] / p
     C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p
-    @test_constraint "Consumption aggregation" C, C == ∑(Cj[j] for j ∈ j)
+    @test_constraint("Consumption aggregation")
+    C,        C == ∑(Cj[j] for j ∈ j)
     p,        p == 1
 end
 

@@ -64,7 +64,8 @@ model_block = @block data begin
     Y,        p * Y == ∑(w[j] * L[j] for j ∈ j)   # Zero profit
     Cj[j ∈ j], Cj[j] == w[j] * ρ[j] * N[j] / p    # Consumption by labor type
     C,        C == ∑(w[j] * ρ[j] * N[j] for j ∈ j) / p  # Budget constraint
-    @test_constraint "Consumption aggregation" C, C == ∑(Cj[j] for j ∈ j)
+    @test_constraint("Consumption aggregation")
+    C,        C == ∑(Cj[j] for j ∈ j)
     p,        p == 1                               # Numeraire
 end
 

@@ -77,13 +77,18 @@ A constraint that tests a solution but does not determine an endogenous variable
 
 `@test_constraint` entries in a [`@block`](@ref) create one `TestConstraint` per
 index. Each test constraint stores a variable used for its name and relative
-tolerance, its JuMP equation, and an optional message.
+tolerance, its JuMP equation, an optional message, and optional tolerance
+overrides.
 """
 struct TestConstraint
 	variable::VariableRef
 	equation::Equation
 	message::String
+	atol::Union{Nothing,Float64}
+	rtol::Union{Nothing,Float64}
 end
+
+TestConstraint(variable, equation, message) = TestConstraint(variable, equation, message, nothing, nothing)
 
 collect_variables!(vars::Set{VariableRef}, eq::Equation) = collect_variables!(vars, eq.func)
 
@@ -769,8 +774,8 @@ macro _block(container, ref_vars, constraint, extra...)
 end
 
 """Build indexed `TestConstraint` objects without residual variables or solve constraints."""
-macro _test_constraint(container, ref_vars, constraint, message)
-	_error(str...) = JuMP._macro_error(:test_constraint, (container, ref_vars, constraint, message), __source__, str...)
+macro _test_constraint(container, ref_vars, constraint, message, atol, rtol)
+	_error(str...) = JuMP._macro_error(:test_constraint, (container, ref_vars, constraint, message, atol, rtol), __source__, str...)
 	sm = @__MODULE__
 	jump_expression = GlobalRef(JuMP, Symbol("@expression"))
 	get_model = GlobalRef(sm, :_get_model)
@@ -792,7 +797,13 @@ macro _test_constraint(container, ref_vars, constraint, message)
 		macrocall = quote
 			let _m = $model_expr
 				_func = $expression_call
-				_test_constraint = $test_constraint_ref($ref_vars, $equation_ref(_func, $set_ref(0.0)), String($message))
+				_test_constraint = $test_constraint_ref(
+					$ref_vars,
+					$equation_ref(_func, $set_ref(0.0)),
+					String($message),
+					$atol,
+					$rtol,
+				)
 				[_test_constraint]
 			end
 		end
@@ -807,6 +818,8 @@ macro _test_constraint(container, ref_vars, constraint, message)
 					$index_var_ref($base_sym, k),
 					$equation_ref(_exprs[k...], $set_ref(0.0)),
 					String($message),
+					$atol,
+					$rtol,
 				) for k in _ks]
 			end
 		end
@@ -817,12 +830,20 @@ macro _test_constraint(container, ref_vars, constraint, message)
 end
 
 """
-    @test_constraint ["message"] variable, constraint
+    @test_constraint(; atol=nothing, rtol=nothing)
+    variable, constraint
 
-Add a constraint that tests the solution without adding an endogenous variable,
-a residual variable, or a solve constraint. The constraint can use `==`, `<=`,
-or `>=`; Unicode `≤` and `≥` also work. The optional string appears in
-[`TestConstraintError`](@ref) output.
+    @test_constraint(message; atol=nothing, rtol=nothing)
+    variable, constraint
+
+Mark the next `variable, constraint` entry as a test constraint. The macro call
+must be a separate statement directly before the entry. The test constraint does
+not add an endogenous variable, a residual variable, or a solve constraint. The
+constraint can use `==`, `<=`, or `>=`; Unicode `≤` and `≥` also work. The
+optional string appears in [`TestConstraintError`](@ref) output. The optional
+`atol` and `rtol` keywords override the matching tolerance passed to
+[`solve`](@ref), [`solve!`](@ref), or [`assert_test_constraints`](@ref) for this
+test constraint.
 
 `@test_constraint` is valid only in an `@block` body. `solve` and `solve!` run
 all test constraints after a successful solve. Use
@@ -833,7 +854,8 @@ all test constraints after a successful solve. Use
 ```julia
 block = @block model begin
     a, a == b + c
-    @test_constraint "a aggregation" a, a == sum(a_i)
+    @test_constraint("a aggregation"; atol=1e-8)
+    a, a == sum(a_i)
 end
 ```
 """
@@ -848,9 +870,9 @@ Create a `Block` of equations mapped to their endogenous variables.
 
 Each standard line in the block body specifies a variable (or indexed variable)
 followed by its defining equation. Equations are stored as lightweight `Equation`
-objects (expression + set) without registering JuMP constraints. An entry that
-starts with `@test_constraint` stores a test constraint that does not enter the
-square solve system.
+objects (expression + set) without registering JuMP constraints. A standalone
+`@test_constraint` call marks the next entry as a test constraint that does not
+enter the square solve system.
 
 SquareModels adds the residual at the first stored occurrence of the mapped
 variable. It adds the residual only once. If the variable is absent, it adds the
@@ -858,8 +880,9 @@ unscaled residual to the right-hand side.
 
 # Arguments
 - `model`: The JuMP model (or ModelDictionary) containing the variables
-- `begin ... end`: A block where each line is `variable, equation_expr` or
-  `@test_constraint ["message"] variable, equation_expr`
+- `begin ... end`: A block where each entry is `variable, equation_expr`. Put
+  `@test_constraint([message]; atol, rtol)` on the prior line to make the entry a
+  test constraint.
 
 # Returns
 A `Block` containing the equation-to-variable mappings.
@@ -928,33 +951,65 @@ macro block(model, expr)
 	line_number = expr.args[1]
 	@assert isa(line_number, LineNumberNode)
 	block_items = Tuple{LineNumberNode,Expr}[]
-	test_constraint_items = Tuple{LineNumberNode,Expr,Any}[]
+	test_constraint_items = Tuple{LineNumberNode,Expr,Any,Any,Any}[]
 	last_tuple = nothing
+	pending_test_constraint = nothing
 	for it in expr.args
 	    if isa(it, LineNumberNode)
 	        line_number = it
 	    elseif isexpr(it, :tuple) # line with commas
 	        length(it.args) == 2 || _error(line_number, it, "Each line must be `variable, equation`")
-	        _is_equality(it.args[2]) || _error(line_number, it, "The equation must use `==`")
-	        push!(block_items, (line_number, it))
+	        if pending_test_constraint === nothing
+	            _is_equality(it.args[2]) || _error(line_number, it, "The equation must use `==`")
+	            push!(block_items, (line_number, it))
+	        else
+	            macro_line, _, message, atol, rtol = pending_test_constraint
+	            _is_test_relation(it.args[2]) || _error(line_number, it, "The test constraint must use `==`, `<=`, or `>=`")
+	            push!(test_constraint_items, (macro_line, it, message, atol, rtol))
+	            pending_test_constraint = nothing
+	        end
 	        last_tuple = it
 	    elseif _is_test_constraint(it)
-	        args = it.args[3:end]
-	        length(args) in (1, 2) || _error(line_number, it, "Use `@test_constraint [\"message\"] variable, equation`")
-	        message = length(args) == 2 ? first(args) : ""
-	        tuple = last(args)
-	        isexpr(tuple, :tuple) && length(tuple.args) == 2 ||
-	            _error(line_number, it, "Each test constraint must be `@test_constraint [\"message\"] variable, equation`")
-	        _is_test_relation(tuple.args[2]) || _error(line_number, it, "The test constraint must use `==`, `<=`, or `>=`")
-	        push!(test_constraint_items, (line_number, tuple, message))
-	        last_tuple = tuple
+	        pending_test_constraint === nothing ||
+	            _error(line_number, it, "Each `@test_constraint` call must be followed by one `variable, equation` entry")
+	        args = Any[it.args[3:end]...]
+	        parameters = !isempty(args) && isexpr(first(args), :parameters) ? popfirst!(args) : Expr(:parameters)
+	        if length(args) in (1, 2) && isexpr(last(args), :tuple)
+	            isempty(parameters.args) ||
+	                _error(line_number, it, "Put `@test_constraint(message; atol, rtol)` on its own line to use keywords")
+	            message = length(args) == 2 ? first(args) : ""
+	            tuple = last(args)
+	            _is_test_relation(tuple.args[2]) || _error(line_number, it, "The test constraint must use `==`, `<=`, or `>=`")
+	            push!(test_constraint_items, (line_number, tuple, message, nothing, nothing))
+	            last_tuple = tuple
+	        else
+	            length(args) in (0, 1) ||
+	                _error(line_number, it, "Put `@test_constraint([message]; atol, rtol)` on its own line before `variable, equation`")
+	            message = isempty(args) ? "" : only(args)
+	            options = Dict{Symbol,Any}(:atol => nothing, :rtol => nothing)
+	            seen_options = Set{Symbol}()
+	            for option in parameters.args
+	                isexpr(option, :kw) && option.args[1] in keys(options) ||
+	                    _error(line_number, it, "Test constraint keywords must be `atol` or `rtol`")
+	                option.args[1] in seen_options &&
+	                    _error(line_number, it, "Test constraint keyword `$(option.args[1])` occurs more than once")
+	                push!(seen_options, option.args[1])
+	                options[option.args[1]] = option.args[2]
+	            end
+	            pending_test_constraint = (line_number, it, message, options[:atol], options[:rtol])
+	            last_tuple = nothing
+	        end
 	    elseif _is_continuation(it) && last_tuple !== nothing
 	        eq = last_tuple.args[2]
 	        eq.args[3] = Expr(:call, it.args[1], eq.args[3], it.args[2])
 	    else
+	        pending_test_constraint === nothing ||
+	            _error(line_number, it, "Each `@test_constraint` call must be followed by one `variable, equation` entry")
 	        _error(line_number, it, "Unexpected code in block body")
 	    end
 	end
+	pending_test_constraint === nothing ||
+	    _error(pending_test_constraint[1], pending_test_constraint[2], "Each `@test_constraint` call must be followed by one `variable, equation` entry")
 	code = Expr(:tuple)
 	for (line_number, it) in block_items
 	    macro_call = Expr(
@@ -967,7 +1022,7 @@ macro block(model, expr)
 	    push!(code.args, esc(macro_call))
 	end
 	test_constraint_code = Expr(:tuple)
-	for (line_number, it, message) in test_constraint_items
+	for (line_number, it, message, atol, rtol) in test_constraint_items
 	    macro_call = Expr(
 	        :macrocall,
 	        test_constraint_macro_ref,
@@ -975,6 +1030,8 @@ macro block(model, expr)
 	        model,
 	        it.args...,
 	        message,
+	        atol,
+	        rtol,
 	    )
 	    push!(test_constraint_code.args, esc(macro_call))
 	end

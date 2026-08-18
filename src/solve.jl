@@ -245,15 +245,18 @@ uses MathOptInterface to get its distance from the constraint set. It does not
 add test constraints to the solve model and does not run a second solve.
 
 A test constraint passes when its distance is at most
-`max(atol, rtol * abs(data[test_constraint.variable]))`. Its optional message
-appears in the error output if it fails. This function returns `true` if all test
-constraints pass and throws [`TestConstraintError`](@ref) if one or more fail.
+`max(atol, rtol * abs(data[test_constraint.variable]))`. An `atol` or `rtol`
+keyword on `@test_constraint` replaces the matching function argument for that
+test. Its optional message appears in the error output if it fails. This function
+returns `true` if all test constraints pass and throws
+[`TestConstraintError`](@ref) if one or more fail.
 
 # Example
 ```julia
 block = @block model begin
     a, a == b + c
-    @test_constraint "a aggregation" a, a == sum(a_i)
+    @test_constraint("a aggregation"; atol=1e-8)
+    a, a == sum(a_i)
 end
 
 solution = solve(block, data)
@@ -271,11 +274,13 @@ function assert_test_constraints(
     for test_constraint in block.test_constraints
         value = _test_constraint_value(test_constraint, data)
         distance = Float64(MOI.Utilities.distance_to_set(value, test_constraint.equation.set))
-        tolerance = Float64(atol)
-        if rtol > 0
+        constraint_atol = something(test_constraint.atol, atol)
+        constraint_rtol = something(test_constraint.rtol, rtol)
+        tolerance = Float64(constraint_atol)
+        if constraint_rtol > 0
             scale = data[test_constraint.variable]
             scale === nothing && error("No data value for test constraint scale variable $(name(test_constraint.variable))")
-            tolerance = max(tolerance, Float64(rtol) * abs(scale))
+            tolerance = max(tolerance, Float64(constraint_rtol) * abs(scale))
         end
         (!isfinite(distance) || distance > tolerance) &&
             push!(violations, (name(test_constraint.variable), distance, tolerance, test_constraint.message))
@@ -607,8 +612,10 @@ Before solving, runs diagnostics to detect trivial equations and orphan variable
 
 After solving, runs all `@test_constraint` entries in the block. Set
 `run_test_constraints=false` to skip them. Use `test_constraint_atol` and
-`test_constraint_rtol` to set their tolerances. If a test constraint fails, the
-thrown [`TestConstraintError`](@ref) stores the solved copy in its `data` field.
+`test_constraint_rtol` to set their default tolerances. An `atol` or `rtol`
+keyword on a test constraint overrides the matching default. If a test
+constraint fails, the thrown [`TestConstraintError`](@ref) stores the solved copy
+in its `data` field.
 
 Optimizer attributes (silent mode, time limit) are copied from the block's model to the
 intermediate solve model. Use `set_silent(model)` or `set_time_limit_sec(model, seconds)`
@@ -622,8 +629,8 @@ on the original model to configure solver behavior.
   values with this number. If not provided, `nothing` values will cause errors.
 - `presolve_diagnostics::Bool`: Run structural diagnostics before the solve (default `true`)
 - `run_test_constraints::Bool`: Run test constraints after the solve (default `true`)
-- `test_constraint_atol::Real`: Absolute tolerance for test constraints (default `1e-6`)
-- `test_constraint_rtol::Real`: Relative tolerance for test constraints (default `1e-8`)
+- `test_constraint_atol::Real`: Default absolute tolerance for test constraints (default `1e-6`)
+- `test_constraint_rtol::Real`: Default relative tolerance for test constraints (default `1e-8`)
 
 # Returns
 A new `ModelDictionary` containing the solution values for endogenous variables,
@@ -689,7 +696,8 @@ Before solving, runs diagnostics to detect trivial equations and orphan variable
 After writing the solved values to `data`, runs all `@test_constraint` entries in
 the block. If one fails, `data` keeps the solved values for inspection. Set
 `run_test_constraints=false` to skip them. Use `test_constraint_atol` and
-`test_constraint_rtol` to set their tolerances.
+`test_constraint_rtol` to set their default tolerances. An `atol` or `rtol`
+keyword on a test constraint overrides the matching default.
 
 Optimizer attributes (silent mode, time limit) are copied from the block's model to the
 intermediate solve model. Use `set_silent(model)` or `set_time_limit_sec(model, seconds)`
@@ -703,8 +711,8 @@ on the original model to configure solver behavior.
   values with this number. If not provided, `nothing` values will cause errors.
 - `presolve_diagnostics::Bool`: Run structural diagnostics before the solve (default `true`)
 - `run_test_constraints::Bool`: Run test constraints after the solve (default `true`)
-- `test_constraint_atol::Real`: Absolute tolerance for test constraints (default `1e-6`)
-- `test_constraint_rtol::Real`: Relative tolerance for test constraints (default `1e-8`)
+- `test_constraint_atol::Real`: Default absolute tolerance for test constraints (default `1e-6`)
+- `test_constraint_rtol::Real`: Default relative tolerance for test constraints (default `1e-8`)
 
 # Returns
 The mutated `data` ModelDictionary.
