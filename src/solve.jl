@@ -403,6 +403,12 @@ function _build_model(
     replace_nothing::Union{Nothing, Number} = nothing,
     presolve_diagnostics::Bool = true
 )
+    duplicates = _duplicate_variables(block.endogenous)
+    isempty(duplicates) || throw(NonSquareError(
+        "Block has a non-unique equation mapping.\n" *
+        "Duplicate endogenous variables:\n$(format_variables(duplicates))"
+    ))
+
     for res in block.residuals
         if !(res ∈ data) || data[res] === nothing
             data[res] = 0.0

@@ -1,3 +1,12 @@
+function _duplicate_variables(vars)
+	seen = Set{VariableRef}()
+	dups = Set{VariableRef}()
+	for var in vars
+		var in seen ? push!(dups, var) : push!(seen, var)
+	end
+	return collect(dups)
+end
+
 """Helper function for endo_exo_swap! macro — single-pair swap (O(N) scan, no allocation)"""
 function _endo_exo_swap!(block::Block, endo::AbstractVariableRef, exo::AbstractVariableRef, error_msg)
 	@assert isa(block, Block)
@@ -23,6 +32,10 @@ function _endo_exo_swap!(block::Block, endo::AbstractVariableRef, exo::AbstractV
 	end
 
 	idx = findfirst(==(exo), block.endogenous)
+	if endo != exo && is_endogenous(endo, block)
+	    error("$endo is already endogenous and cannot replace $exo. " *
+	          "The swap would create a non-unique equation mapping: $error_msg")
+	end
 	block.endogenous[idx] = endo
 	delete!(block._endogenous_set, exo)
 	push!(block._endogenous_set, endo)
@@ -40,8 +53,11 @@ function _endo_exo_swap!(block::Block, endos, exos, error_msg)
 	          "  exo variables ($(length(exos))): $exo_names")
 	end
 
-	# Build reverse index for O(1) lookup per swap
+	# Validate the full swap before mutation so errors leave the block unchanged.
 	idx_map = Dict{VariableRef, Int}(v => i for (i, v) in enumerate(block.endogenous))
+	length(Set(exos)) == length(exos) ||
+	    error("Exogenous variables in an endo-exo swap must be unique: $error_msg")
+	indices = Int[]
 
 	for (endo, exo) in zip(endos, exos)
 	    if !is_endogenous(exo, block)
@@ -63,15 +79,23 @@ function _endo_exo_swap!(block::Block, endos, exos, error_msg)
 	    if endo ∉ block.variables
 	        error("$endo does not appear in the block's constraints and cannot be endogenized: $error_msg")
 	    end
-
-	    idx = idx_map[exo]
-	    block.endogenous[idx] = endo
-	    delete!(idx_map, exo)
-	    idx_map[endo] = idx
-
-	    delete!(block._endogenous_set, exo)
-	    push!(block._endogenous_set, endo)
+	    push!(indices, idx_map[exo])
 	end
+
+	candidate = copy(block.endogenous)
+	for (idx, endo) in zip(indices, endos)
+	    candidate[idx] = endo
+	end
+	duplicates = _duplicate_variables(candidate)
+	if !isempty(duplicates)
+	    error("Endo-exo swap would create a non-unique equation mapping.\n" *
+	          "Duplicate endogenous variables:\n$(format_variables(duplicates))\n" *
+	          "Swap: $error_msg")
+	end
+
+	copyto!(block.endogenous, candidate)
+	empty!(block._endogenous_set)
+	union!(block._endogenous_set, candidate)
 end
 
 """

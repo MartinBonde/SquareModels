@@ -300,6 +300,41 @@ end
 		end
 		unfix(b2)
 	end
+
+	@testset "duplicate endogenous variables" begin
+		m3 = Model()
+		JuMP.@variables m3 begin
+			a
+			b
+			shared
+		end
+		b3 = @block m3 begin
+			a, a + shared == 1
+			b, b + shared == 1
+		end
+		original_endogenous = copy(endogenous(b3))
+
+		err = try
+			SquareModels._endo_exo_swap!(b3, [shared, shared], [a, b], "duplicate test")
+			nothing
+		catch e
+			e
+		end
+		@test err isa ErrorException
+		@test occursin("non-unique equation mapping", err.msg)
+		@test occursin("shared", err.msg)
+		@test endogenous(b3) == original_endogenous
+
+		b3.endogenous[2] = a
+		err = try
+			solve(b3, ModelDictionary(m3, 0.0))
+			nothing
+		catch e
+			e
+		end
+		@test err isa NonSquareError
+		@test occursin("non-unique equation mapping", err.msg)
+	end
 end
 
 @testset "@endo_exo_swap!" begin
