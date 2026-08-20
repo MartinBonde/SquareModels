@@ -176,7 +176,10 @@ function Base.getindex(s::SparseZeroArray{T,N,KT}, args...; kwargs...) where {T,
         isempty(args) || error("Cannot index with mix of positional and keyword arguments")
         return getindex(s, Containers._kwargs_to_args(s.data; kwargs...)...)
     end
-    if args isa KT
+    if args isa KT && all(
+        !_is_slice_index(arg, key_type)
+        for (arg, key_type) in zip(args, KT.parameters)
+    )
         for (arg, dom) in zip(args, s.domain)
             arg in dom || error("Index $arg is not in the domain $dom")
         end

@@ -39,6 +39,45 @@ end
 	@test sprint(show, ModelDictionary(Model())) == "ModelDictionary with 0 entries"
 end
 
+@testset "Sparse ModelDictionary display" begin
+	sparse_model = Model()
+	stored = [(:a, :x), (:b, :y)]
+	SquareModels.@variables sparse_model begin
+		s[i = [:a, :b], j = [:x, :y], t = 1:2; (i, j) in stored]
+		empty_s[i = [:a]; i in Symbol[]]
+	end
+	b = ModelDictionary(sparse_model, collect(1.0:length(s)))
+	w = b[s]
+
+	@test s isa SparseZeroArray
+	@test w.indices isa JuMP.Containers.SparseAxisArray
+	output = sprint(show, MIME"text/plain"(), w)
+	@test startswith(output, "4-element Window:\n")
+	@test all(
+		occursin(" s[$i, $j, $t] => $(b[s[i, j, t]])", output)
+		for (i, j) in stored for t in 1:2
+	)
+	@test b[empty_s].indices isa JuMP.Containers.SparseAxisArray
+	@test sprint(show, MIME"text/plain"(), b[empty_s]) == "0-element Window"
+
+	use_sparse_zero_array!(false)
+	try
+		SquareModels.@variables sparse_model begin
+			p[i = [:a, :b], j = [:x, :y]; (i, j) in stored]
+		end
+		add_missing_model_variables!(b)
+		b[p] .= [5.0, 6.0]
+		plain = b[p]
+		@test p isa JuMP.Containers.SparseAxisArray
+		@test plain.indices isa JuMP.Containers.SparseAxisArray
+		output = sprint(show, MIME"text/plain"(), plain)
+		@test startswith(output, "2-element Window:\n")
+		@test all(occursin(" p[$i, $j] => $(b[p[i, j]])", output) for (i, j) in stored)
+	finally
+		use_sparse_zero_array!(true)
+	end
+end
+
 @testset "Test getting and setting single variables refs" begin
 	b = ModelDictionary(model)
 
