@@ -367,6 +367,7 @@ end
     @test name(price[:a, :x, 2020]) == "price[a,x,2020]"
     @test m[:price] === price
     @test price[:a, :, 2020] isa SparseZeroArray
+    @test Set(keys(price[[:a, :b], :, :])) == stored
 
     @test Set(keys(from_keys)) == stored
     @test from_keys[:a, :y, 2020] isa SquareModels.Zero
@@ -547,11 +548,10 @@ end
     @test x isa SparseZeroArray
 
     d = ModelDictionary(m)
-    # getindex delegates to underlying SparseAxisArray
     w = d[x]
     @test w isa SquareModels.Window
+    @test w.indices isa SparseAxisArray
 
-    # setindex! delegates
     d[x] .= 1.0
     @test all(d[v] == 1.0 for v in x)
 end

@@ -193,10 +193,20 @@ Base.getindex(d::ModelDictionary, s::SparseZeroArray) = getindex(d, s.data)
 Base.setindex!(d::ModelDictionary, value, s::SparseZeroArray) = setindex!(d, value, s.data)
 
 function Base.getindex(d::ModelDictionary, container::AbstractArray{<:AbstractVariableRef})
-	varname = isempty(container) ? nothing : split(name(first(container)), "[")[1]
+	if isempty(container)
+		data_view = @view(d.dictionary.values[Int[]])
+		return create_window(data_view, container, nothing)
+	end
+	varname = split(name(first(container)), "[")[1]
 	getindex(d, name.(container), varname)
 end
-Base.getindex(d::ModelDictionary, container::AbstractArray) = getindex(d, string.(container), nothing)
+function Base.getindex(d::ModelDictionary, container::AbstractArray)
+	if isempty(container)
+		data_view = @view(d.dictionary.values[Int[]])
+		return create_window(data_view, container, nothing)
+	end
+	return getindex(d, string.(container), nothing)
+end
 
 # Filtering with a boolean ModelDictionary (e.g., d[d .> 0])
 function Base.getindex(d::ModelDictionary, mask::ModelDictionary)
@@ -274,6 +284,9 @@ _key_to_tuple(k::CartesianIndex) = Tuple(k)
 _key_to_tuple(k::Tuple) = k
 _key_to_tuple(k) = (k,)
 
+_sparse_keys(s::SparseZeroArray) = keys(s)
+_sparse_keys(s::SparseAxisArray) = keys(s.data)
+
 """
     _combo_label(varname, combo)
 
@@ -308,6 +321,26 @@ function Base.show(io::IO, ::MIME"text/plain", w::Window)
 	n == 0 && return
 	println(io, ":")
 	_labeled_table(io, w.shaped_view, ax, w.varname)
+end
+function Base.show(io::IO, ::MIME"text/plain", w::Window{<:Any,<:Union{SparseZeroArray,SparseAxisArray}})
+	n = length(w)
+	print(io, "$n-element Window")
+	n == 0 && return
+	println(io, ":")
+	name = w.varname === nothing ? "" : string(w.varname)
+	max_show = get(io, :limit, false) ? 10 : n
+	half = max_show ÷ 2
+	for (line, key) in enumerate(_sparse_keys(w.indices))
+		if n > max_show && line == half + 1
+			println(io, " ⋮")
+			continue
+		elseif n > max_show && half < line < n - half + 1
+			continue
+		end
+		coordinate = _key_to_tuple(key)
+		print(io, " ", name, "[", join(coordinate, ", "), "] => ", w.data_view[w.indices[coordinate...]])
+		line < n && println(io)
+	end
 end
 Base.show(io::IO, w::Window) = show(io, MIME"text/plain"(), w)
 
