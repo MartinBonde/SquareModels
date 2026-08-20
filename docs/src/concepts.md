@@ -173,7 +173,8 @@ simple-format CSV/Parquet files.
 
 ## Variable Metadata
 
-SquareModels extends JuMP's `@variables` syntax with descriptions and tags:
+SquareModels `@variables` adds descriptions and tags. Use
+`JuMP.@variables` for JuMP's original macro:
 
 ```julia
 const GrowthAdjusted = Tag(:growth_adjusted)
@@ -207,6 +208,48 @@ This lets you write sums over sparse domains without filtering every access:
 
 ```julia
 total = ∑(x[i, j] for i in 1:5, j in 1:5)
+```
+
+A semicolon `in` filter walks the membership set. The named axis sets are the
+domain used for `Zero()` lookup:
+
+```julia
+@variables data.model begin
+    value[p = product, i = industry, t = years; (p, i) in pairs]
+    price[p = product, i = industry, t = years; (p, i, t) in keys(value)]
+end
+```
+
+Put index names in parentheses to unpack stated sparse coordinates:
+
+```julia
+@variables data.model begin
+    use[(product, industry) = product_industry_pairs, year = years]
+end
+```
+
+This form builds `use[product, industry, year]` from
+`product_industry_pairs × years`. It does not scan the full product and
+industry sets. Without parentheses, a tuple remains one axis:
+
+```julia
+@variables data.model begin
+    flow[edge = edges, year = years]
+end
+```
+
+Pass a `SparseZeroArray` to copy its stored cells and its domain. `keys(array)`
+supplies only those tuples. [`select_axes`](@ref) picks axes.
+[`merge_indices`](@ref) unions arrays. A one-axis unpack needs a trailing comma:
+
+```julia
+@variables data.model begin
+    price[(product, industry, year) = value]
+    from_keys[(product, industry, year) = keys(value)]
+    share[(product, year) = select_axes(value, 1, 3)]
+    output[(industry,) = select_axes(value, 2), year = years]
+    use[(product, use, origin, year) = merge_indices(purchaser, margin)]
+end
 ```
 
 Disable the wrapper with [`use_sparse_zero_array!`](@ref) if you prefer standard
