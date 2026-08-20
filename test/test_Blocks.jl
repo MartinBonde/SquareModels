@@ -385,6 +385,33 @@ end
 		@test !any(is_fixed.(y))
 		@test all(is_fixed.(y_exo))
 	end
+
+	@testset "filtered indices" begin
+		JuMP.@variables m begin
+			z[1:2, 1:3]
+			z_exo[1:2, 1:3]
+		end
+		selected = Set([(1, 1), (1, 2), (2, 2), (2, 3)])
+		b = @block m begin
+			z[i = 1:2, t = 1:3], z[i, t] + z_exo[i, t] == 1
+		end
+
+		@endo_exo_swap! b begin
+			z_exo[(i, t) in selected; t > 1], z[i, t]
+		end
+
+		expected = vec([
+			(i, t) in selected && t > 1 ? z_exo[i, t] : z[i, t]
+			for i in 1:2, t in 1:3
+		])
+		@test endogenous(b) == expected
+
+		b = @block m begin
+			z[i = 1:2, t = 1:3], z[i, t] + z_exo[i, t] == 1
+		end
+		@endo_exo_swap!(b, z_exo[(i, t) in selected; t > 1], z[i, t])
+		@test endogenous(b) == expected
+	end
 end
 
 @testset "@endo_exo_swap! error messages" begin

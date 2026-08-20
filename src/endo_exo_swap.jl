@@ -7,6 +7,14 @@ function _duplicate_variables(vars)
 	return collect(dups)
 end
 
+_is_swap_index(expr) =
+	isexpr(expr, :kw) ||
+	(isexpr(expr, :call) && !isempty(expr.args) && expr.args[1] in (:in, :∈))
+
+_is_indexed_swap(expr) =
+	isexpr(expr, :typed_vcat) ||
+	(isexpr(expr, :ref) && any(_is_swap_index, expr.args[2:end]))
+
 """Helper function for endo_exo_swap! macro — single-pair swap (O(N) scan, no allocation)"""
 function _endo_exo_swap!(block::Block, endo::AbstractVariableRef, exo::AbstractVariableRef, error_msg)
 	@assert isa(block, Block)
@@ -98,6 +106,28 @@ function _endo_exo_swap!(block::Block, endos, exos, error_msg)
 	union!(block._endogenous_set, candidate)
 end
 
+macro _endo_exo_swap_indexed!(block, endos, exos, error_msg)
+	jump_expression = GlobalRef(JuMP, Symbol("@expression"))
+	all_keys_ref = GlobalRef(@__MODULE__, :_all_keys)
+	index_var_ref = GlobalRef(@__MODULE__, :_index_var)
+	swap_ref = GlobalRef(@__MODULE__, :_endo_exo_swap!)
+	base = _get_name(endos)
+	indices = Expr(isexpr(endos, :ref) ? :vect : :vcat, endos.args[2:end]...)
+	exos_call = Expr(:macrocall, jump_expression, __source__, :_m, indices, exos)
+
+	return esc(quote
+		let _block = $block
+			let _m = _block.model
+				_exos = $exos_call
+				_keys = $all_keys_ref(_exos)
+				_endos = [$index_var_ref($base, key) for key in _keys]
+				_exo_vars = [_exos[key...] for key in _keys]
+				$swap_ref(_block, _endos, _exo_vars, $error_msg)
+			end
+		end
+	end)
+end
+
 """
 Macro used to change which variables are matched to the constraints in a Block.
 Example:
@@ -105,6 +135,18 @@ Example:
 """
 macro endo_exo_swap!(block, endos, exos)
 	error_msg = string(:($endos => $exos))
+	if _is_indexed_swap(endos)
+		indexed_swap_ref = GlobalRef(@__MODULE__, Symbol("@_endo_exo_swap_indexed!"))
+		return esc(Expr(
+			:macrocall,
+			indexed_swap_ref,
+			__source__,
+			block,
+			endos,
+			exos,
+			error_msg,
+		))
+	end
 	swap_ref = GlobalRef(@__MODULE__, :_endo_exo_swap!)
 	esc(quote
 	    $swap_ref($block, $endos, $exos, $error_msg)
@@ -117,17 +159,30 @@ Example:
   @endo_exo_swap! my_block begin
 	    MPC, C[t₁]
 	    δ, K[t₁]
+	    share[(i, t) in keys(output); t == t₁], output[i, t]
   end
 """
 macro endo_exo_swap!(block, expr)
 	@assert isa(expr.args[1], LineNumberNode)
 	swap_ref = GlobalRef(@__MODULE__, :_endo_exo_swap!)
+	indexed_swap_ref = GlobalRef(@__MODULE__, Symbol("@_endo_exo_swap_indexed!"))
 	code = Expr(:block)
+	line_number = expr.args[1]
 	for it in expr.args
-	    if !isa(it, LineNumberNode)
-	        call = :($swap_ref($block, $(it.args[1]), $(it.args[2]), $it))
-	        push!(code.args, call)
-	    end
+		if isa(it, LineNumberNode)
+			line_number = it
+		elseif _is_indexed_swap(it.args[1])
+			push!(code.args, Expr(
+				:macrocall,
+				indexed_swap_ref,
+				line_number,
+				block,
+				it.args...,
+				string(it),
+			))
+		else
+			push!(code.args, :($swap_ref($block, $(it.args[1]), $(it.args[2]), $it)))
+		end
 	end
 	return esc(code)
 end
