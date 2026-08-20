@@ -104,6 +104,17 @@ end
 The left-hand variable becomes endogenous. The right-hand variable must already
 be endogenous in the block and becomes exogenous data.
 
+Use the same indexed form as `@block` to swap a subset. The indexed left side
+sets the indices for both variables:
+
+```julia
+@endo_exo_swap! calibration begin
+    share[(i, t) in keys(output); t == t₀], output[i, t]
+end
+```
+
+The form supports named indices, tuple-key sets, and a filter after `;`.
+
 ## Model Dictionaries
 
 [`ModelDictionary`](@ref) maps JuMP variables to values and supports scalar,
