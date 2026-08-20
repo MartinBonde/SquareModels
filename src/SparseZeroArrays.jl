@@ -65,6 +65,101 @@ function SparseZeroArray(data::AbstractDict)
     return SparseZeroArray(saa, _domain_from_keys(saa))
 end
 
+"""
+Coordinates plus per-axis domain, used by [`select_axes`](@ref) and
+[`merge_indices`](@ref) as an `@variables` unpack source.
+"""
+struct SparseIndexPattern{K,D}
+    coordinates::K
+    domain::D
+end
+
+Base.eltype(::Type{SparseIndexPattern{K,D}}) where {K,D} = eltype(K)
+Base.IteratorSize(::Type{<:SparseIndexPattern}) = Base.HasLength()
+Base.length(indices::SparseIndexPattern) = length(indices.coordinates)
+Base.iterate(indices::SparseIndexPattern, state...) = iterate(indices.coordinates, state...)
+
+_index_tuple(key::Tuple) = key
+_index_tuple(key) = (key,)
+
+_index_pattern(s::SparseZeroArray) =
+    SparseIndexPattern(collect(keys(s)), map(copy, s.domain))
+_index_pattern(s::SparseAxisArray) =
+    SparseIndexPattern(collect(keys(s.data)), _domain_from_keys(s))
+_index_pattern(s::SparseIndexPattern) =
+    SparseIndexPattern(s.coordinates, map(copy, s.domain))
+
+const _IndexPatternSource = Union{SparseZeroArray,SparseAxisArray,SparseIndexPattern}
+
+function _select_pattern_axes(indices::SparseIndexPattern, selected::Tuple{Vararg{Int}})
+    n = length(indices.domain)
+    all(in(1:n), selected) ||
+        error("select_axes axes must be between 1 and $n, got $selected")
+    coordinates = unique(
+        ntuple(i -> _index_tuple(key)[selected[i]], length(selected))
+        for key in indices
+    )
+    domain = ntuple(i -> copy(indices.domain[selected[i]]), length(selected))
+    return SparseIndexPattern(coordinates, domain)
+end
+
+"""
+    select_axes(array, dimensions...)
+    select_axes(keys, dimensions...)
+
+Pick and reorder axes from sparse coordinates.
+
+When `array` is a [`SparseZeroArray`](@ref) or the result of [`merge_indices`](@ref),
+the result keeps the matching axis domains. [`@variables`](@ref) uses those
+domains when a tuple-destructured axis unpacks the result.
+
+When the source is `keys(array)` or another iterator of tuples, the result is
+only those projected tuples.
+
+A one-axis unpack needs a trailing comma: `(industry,) = select_axes(value, 2)`.
+
+```julia
+@variables model begin
+    share[(product, year) = select_axes(value, 1, 3)]
+    output[(industry,) = select_axes(value, 2), year = years]
+end
+```
+"""
+select_axes(source::_IndexPatternSource, dimension::Int, dimensions::Int...) =
+    _select_pattern_axes(_index_pattern(source), (dimension, dimensions...))
+
+function select_axes(indices, dimension::Int, dimensions::Int...)
+    selected = (dimension, dimensions...)
+    return unique(
+        ntuple(i -> _index_tuple(key)[selected[i]], length(selected))
+        for key in indices
+    )
+end
+
+"""
+    merge_indices(array, arrays...)
+
+Union of stored coordinates from sparse arrays with the same number of axes.
+
+The result keeps the union of each axis domain. [`@variables`](@ref) uses that
+domain when a tuple-destructured axis unpacks the result.
+
+```julia
+@variables model begin
+    use[(product, use, origin, year) = merge_indices(purchaser, margin)]
+end
+```
+"""
+function merge_indices(first::_IndexPatternSource, second::_IndexPatternSource, rest::_IndexPatternSource...)
+    sources = map(_index_pattern, (first, second, rest...))
+    n = length(sources[1].domain)
+    all(source -> length(source.domain) == n, sources) ||
+        error("merge_indices requires sources with the same number of axes")
+    coordinates = unique(key for source in sources for key in source)
+    domain = ntuple(i -> union((source.domain[i] for source in sources)...), n)
+    return SparseIndexPattern(coordinates, domain)
+end
+
 _is_slice_index(::Colon, ::Type) = true
 _is_slice_index(arg, ::Type{Ki}) where {Ki} = arg isa AbstractVector{<:Ki}
 

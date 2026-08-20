@@ -5,6 +5,13 @@ using JuMP: Model, @variable, all_variables, fix, unfix, is_fixed, value, set_st
 using JuMP.Containers: SparseAxisArray
 using Ipopt
 
+struct VisitVector{T} <: AbstractVector{T}
+    data::Vector{T}
+    visits::Ref{Int}
+end
+Base.size(v::VisitVector) = size(v.data)
+Base.getindex(v::VisitVector, i::Integer) = (v.visits[] += 1; v.data[i])
+
 @testset "Zero sentinel" begin
     z = SquareModels.Zero()
     @test z + 1 === 1
@@ -281,7 +288,7 @@ end
     @test_throws ErrorException sparse_var[1, 4]
 end
 
-@testset "@variables with tuple destructuring" begin
+@testset "@variables semicolon filter" begin
     m = Model()
     pairs = [(:a, :b), (:c, :d)]
     pairs_set = Set(pairs)
@@ -297,6 +304,209 @@ end
     @test x[:a, :d, 1] isa SquareModels.Zero
     # Out of domain
     @test_throws ErrorException x[:z, :b, 1]
+end
+
+@testset "@variables tuple destructuring" begin
+    m = Model()
+    pairs = [(:a, :x), (:b, :y), (:c, :x)]
+    years = 2020:2021
+    sparse_tag = Tag(:sparse_tag)
+
+    @variables m begin
+        dense[i = [:a, :b], year = years], "Dense variable"
+        sparse[(product, industry) = pairs, year = years] :: sparse_tag, "Sparse variable"
+        flow[edge = pairs, year = years], "Tuple-valued axis"
+    end
+
+    @test dense isa JuMP.Containers.DenseAxisArray
+    @test flow isa JuMP.Containers.DenseAxisArray
+    @test ndims(flow) == 2
+    @test flow[(:a, :x), 2020] isa VariableRef
+
+    @test sparse isa SparseZeroArray
+    @test ndims(sparse) == 3
+    @test length(sparse) == length(pairs) * length(years)
+    @test sparse.data.names == (:product, :industry, :year)
+    @test name(sparse[:a, :x, 2020]) == "sparse[a,x,2020]"
+    @test sparse[:a, :y, 2020] isa SquareModels.Zero
+    @test_throws ErrorException sparse[:d, :x, 2020]
+    @test m[:sparse] === sparse
+    @test description(:sparse) == "Sparse variable"
+    @test sparse_tag in tags(:sparse)
+
+    data = ModelDictionary(m)
+    data[sparse] .= 1.0
+    @test all(data[variable] == 1.0 for variable in sparse)
+end
+
+@testset "@variables copies domain from a SparseZeroArray, not from keys" begin
+    m = Model()
+    products = [:a, :b, :c]
+    industries = [:x, :y, :z]
+    years = 2020:2021
+    stored = Set([(:a, :x, 2020), (:b, :y, 2021)])
+    other_stored = Set([(:a, :x, 2020), (:c, :x, 2021)])
+
+    @variables m begin
+        value[p = products, i = industries, t = years; (p, i, t) in stored]
+        other[p = products, i = industries, t = years; (p, i, t) in other_stored]
+        price[(p, i, t) = value]
+        from_keys[(p, i, t) = keys(value)]
+        from_filter[p = products, i = industries, t = years; (p, i, t) in keys(value)]
+        projected[(p, t) = select_axes(value, 1, 3)]
+        projected_keys[(p, t) = select_axes(keys(value), 1, 3)]
+        industry[(i,) = select_axes(value, 2)]
+        merged[(p, i, t) = merge_indices(value, other)]
+    end
+
+    @test price isa SparseZeroArray
+    @test ndims(price) == 3
+    @test Set(keys(price)) == stored
+    @test price[:c, :y, 2020] isa SquareModels.Zero
+    @test_throws ErrorException price[:d, :y, 2020]
+    @test name(price[:a, :x, 2020]) == "price[a,x,2020]"
+    @test m[:price] === price
+    @test price[:a, :, 2020] isa SparseZeroArray
+
+    @test Set(keys(from_keys)) == stored
+    @test from_keys[:a, :y, 2020] isa SquareModels.Zero
+    @test_throws ErrorException from_keys[:c, :x, 2020]
+    @test from_filter[:c, :y, 2020] isa SquareModels.Zero
+    @test_throws ErrorException from_filter[:d, :y, 2020]
+
+    @test Set(keys(projected)) == Set((p, t) for (p, _, t) in stored)
+    @test projected[:c, 2020] isa SquareModels.Zero
+    @test_throws ErrorException projected_keys[:c, 2020]
+    @test Set(keys(industry)) == Set((i,) for (_, i, _) in stored)
+    @test industry[:z] isa SquareModels.Zero
+    @test_throws ErrorException industry[:w]
+    @test Set(keys(merged)) == union(stored, other_stored)
+    @test merged[:c, :y, 2020] isa SquareModels.Zero
+    @test_throws ErrorException select_axes(value, 1, 4)
+    @test_throws ErrorException merge_indices(value, projected)
+end
+
+@testset "axis-dependent membership filter uses nested JuMP evaluation" begin
+    m = Model()
+    products = [:a, :b]
+    years = 2020:2021
+    byyear = Dict(2020 => [:a], 2021 => [:a, :b])
+
+    @variables m begin
+        x[p = products, t = years; p in byyear[t]]
+    end
+
+    @test x isa SparseZeroArray
+    @test x[:a, 2020] isa VariableRef
+    @test x[:b, 2020] isa SquareModels.Zero
+    @test x[:b, 2021] isa VariableRef
+    @test_throws ErrorException x[:c, 2020]
+end
+
+@testset "empty sparse coordinate sets still create variables" begin
+    m = Model()
+    products = [:a, :b]
+    industries = [:x, :y]
+    years = 2020:2021
+    empty_pairs = []
+
+    @variables m begin
+        empty_filter[p = products, i = industries, t = years; (p, i) in empty_pairs]
+        empty_unpack[(p, i) = empty_pairs, t = years]
+    end
+
+    @test empty_filter isa SparseZeroArray
+    @test isempty(empty_filter)
+    @test empty_filter[:a, :x, 2020] isa SquareModels.Zero
+    @test_throws ErrorException empty_filter[:z, :x, 2020]
+
+    @test empty_unpack isa SparseZeroArray
+    @test isempty(empty_unpack)
+    @test_throws ErrorException empty_unpack[:a, :x, 2020]
+end
+
+@testset "single-name membership filter keeps tuple values on one axis" begin
+    m = Model()
+    edges = [(:a, :x), (:b, :y), (:c, :z)]
+    chosen = [(:a, :x), (:b, :y)]
+    years = 2020:2021
+
+    @variables m begin
+        flow[edge = edges, year = years; edge in chosen]
+    end
+
+    @test flow isa SparseZeroArray
+    @test ndims(flow) == 2
+    @test flow[(:a, :x), 2020] isa VariableRef
+    @test flow[(:c, :z), 2020] isa SquareModels.Zero
+    @test_throws ErrorException flow[(:d, :w), 2020]
+end
+
+@testset "single-axis semicolon filter wraps SparseZeroArray" begin
+    m = Model()
+    I = [:a, :b, :c]
+    S = [:a, :b]
+    sparse_tag = Tag(:sparse_tag)
+
+    @variables m begin
+        x[i = I; i in S] :: sparse_tag
+        y[i = 1:3; i <= 2]
+    end
+
+    @test x isa SparseZeroArray
+    @test x[:a] isa VariableRef
+    @test x[:c] isa SquareModels.Zero
+    @test_throws ErrorException x[:d]
+    @test sparse_tag in tags(:x)
+
+    @test y isa SparseZeroArray
+    @test y[1] isa VariableRef
+    @test y[3] isa SquareModels.Zero
+    @test_throws ErrorException y[4]
+end
+
+@testset "membership filter scales with keys not the Cartesian product" begin
+    products = 1:8
+    industries = 1:7
+    years = 1:3
+    pairs = [(1, 1), (3, 4), (8, 7)]
+    visits = Ref(0)
+    counted_years = VisitVector(collect(years), visits)
+
+    m = Model()
+    @variables m begin
+        x[p = products, i = industries, t = counted_years; (p, i) in pairs]
+    end
+
+    @test visits[] == length(years)
+    @test length(x) == length(pairs) * length(years)
+    @test x[2, 1, 1] isa SquareModels.Zero
+    @test_throws ErrorException x[9, 1, 1]
+end
+
+@testset "tuple destructuring scales with supplied coordinates" begin
+    products = 1:8
+    industries = 1:7
+    years = 1:3
+    pairs = [(1, 1), (3, 4), (8, 7)]
+
+    old_checks = Ref(0)
+    old_model = Model()
+    @variables old_model begin
+        old[p = products, i = industries, t = years;
+            (old_checks[] += 1; (p, i) in pairs)]
+    end
+
+    pair_visits = Ref(0)
+    direct_pairs = ((pair_visits[] += 1; pair) for pair in pairs)
+    new_model = Model()
+    @variables new_model begin
+        new[(p, i) = direct_pairs, t = years]
+    end
+
+    @test old_checks[] == length(products) * length(industries) * length(years)
+    @test pair_visits[] == length(pairs)
+    @test length(old) == length(new) == length(pairs) * length(years)
 end
 
 @testset "SparseZeroArray domain covers full index sets, not just filtered keys" begin
@@ -365,6 +575,24 @@ end
     @test all(is_endogenous(x.data[i, j], b) for i in 1:3, j in 1:3 if i != j)
 end
 
+@testset "@block with tuple-destructured SparseZeroArray" begin
+    m = Model(Ipopt.Optimizer)
+    pairs = [(:a, :x), (:b, :y)]
+    years = 2020:2021
+
+    @variables m begin
+        x[(product, industry) = pairs, year = years]
+        param[(product, industry) = select_axes(x, 1, 2), year = years]
+    end
+
+    b = @block m begin
+        x[(product, industry, year) in keys(x)], x[product, industry, year] == param[product, industry, year] + 1
+    end
+
+    @test length(b) == length(pairs) * length(years)
+    @test all(is_endogenous(x[product, industry, year], b) for (product, industry) in pairs, year in years)
+end
+
 @testset "use_sparse_zero_array! flag" begin
     # Enabled (default): filtered variables produce SparseZeroArray
     m1 = Model()
@@ -389,6 +617,17 @@ end
     @test !(d2 isa SparseZeroArray)
     @test m2[:x2] isa SparseAxisArray
     @test !(m2[:x2] isa SparseZeroArray)
+
+    m3 = Model()
+    use_sparse_zero_array!(false)
+    @variables m3 begin
+        x3[(product, industry) = [(:a, :x), (:b, :y)], year = 2020:2021]
+    end
+    use_sparse_zero_array!(true)
+    @test x3 isa SparseAxisArray
+    @test !(x3 isa SparseZeroArray)
+    @test ndims(x3) == 3
+    @test length(x3) == 4
 end
 
 @testset "block-level tags with tuple membership filter" begin
