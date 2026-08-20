@@ -191,9 +191,18 @@ to query the metadata.
 
 ## SparseZeroArray
 
-Conditional JuMP containers are wrapped in [`SparseZeroArray`](@ref) by default.
-Missing combinations inside the declared domain return `Zero()`, which behaves
-like an additive zero in JuMP expressions:
+Sparse models need short expressions, fast declarations, and strict index
+checks. [`SparseZeroArray`](@ref) lets an expression such as
+`∑(x[a, b, c] * (1 + t[a, b, c]) for a in A)` use missing in-domain cells as
+`Zero()` without a lookup guard. An out-of-domain access still fails, so the
+model can catch a bad index or index order. A naive implementation of
+`x[a = A, b = B, c = C; (a, b, c) in a_b_c_filter]` tests every combination of
+`A`, `B`, and `C`. Direct coordinate unpack and the index helpers let one
+variable reuse another variable's stored index pattern without that full scan.
+They also keep tuple coordinates distinct from tuple-valued axes.
+
+SquareModels wraps sparse `@variables` containers in `SparseZeroArray` by
+default:
 
 ```julia
 @variables data.model begin
@@ -202,6 +211,7 @@ end
 
 x[1, 2]  # VariableRef
 x[3, 1]  # Zero()
+x[6, 1]  # Error: 6 is outside the declared domain
 ```
 
 This lets you write sums over sparse domains without filtering every access:
@@ -210,8 +220,10 @@ This lets you write sums over sparse domains without filtering every access:
 total = ∑(x[i, j] for i in 1:5, j in 1:5)
 ```
 
-A semicolon `in` filter walks the membership set. The named axis sets are the
-domain used for `Zero()` lookup:
+For an independent `in` filter, `@variables` walks the membership set instead
+of the full product of the named axes. The named axes still define the domain
+used for `Zero()` lookup. The membership set selects only the coordinates that
+store variables:
 
 ```julia
 @variables data.model begin
@@ -220,7 +232,14 @@ domain used for `Zero()` lookup:
 end
 ```
 
-Put index names in parentheses to unpack stated sparse coordinates:
+Thus, `value[p, i, t]` returns `Zero()` when `p`, `i`, and `t` belong to their
+named axes but `(p, i)` is not in `pairs`. It causes an error only when an index
+is outside its named axis.
+
+JuMP evaluates other filter forms, including filters whose membership set
+depends on an axis, over the named axes.
+
+Put index names in parentheses to state stored coordinates directly:
 
 ```julia
 @variables data.model begin
@@ -228,9 +247,15 @@ Put index names in parentheses to unpack stated sparse coordinates:
 end
 ```
 
-This form builds `use[product, industry, year]` from
-`product_industry_pairs × years`. It does not scan the full product and
-industry sets. Without parentheses, a tuple remains one axis:
+Each item in `product_industry_pairs` must contain a product and an industry.
+This form creates variables only for `product_industry_pairs × years`; it does
+not scan separate product and industry sets. For an ordinary coordinate source,
+the unique values found in each coordinate position define that axis domain.
+A missing combination of those values returns `Zero()`. A value that does not
+occur in the applicable coordinate position is outside the domain and causes
+an error.
+
+Without parentheses, each tuple remains one value on one axis:
 
 ```julia
 @variables data.model begin
@@ -238,9 +263,15 @@ industry sets. Without parentheses, a tuple remains one axis:
 end
 ```
 
-Pass a `SparseZeroArray` to copy its stored cells and its domain. `keys(array)`
-supplies only those tuples. [`select_axes`](@ref) picks axes.
-[`merge_indices`](@ref) unions arrays. A one-axis unpack needs a trailing comma:
+Use a `SparseZeroArray` as the source to reuse its stored coordinates and full
+axis domain. The declaration creates new JuMP variables; it does not copy cell
+values. `keys(array)` supplies only the stored coordinates and derives each
+axis domain from those keys.
+
+[`select_axes`](@ref) projects stored coordinates. It keeps the selected axis
+domains when its source has domain data. [`merge_indices`](@ref) unions the
+stored coordinates and axis domains of sparse arrays. A one-axis unpack needs
+a trailing comma:
 
 ```julia
 @variables data.model begin
