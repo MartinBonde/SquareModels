@@ -46,6 +46,7 @@ const _name_lookup_cache = WeakKeyDict{AbstractModel, Dict{String, VariableRef}}
 include("errors.jl")
 include("utils.jl")
 include("SparseZeroArrays.jl")
+include("TableDisplay.jl")
 
 """
     AbstractSeries

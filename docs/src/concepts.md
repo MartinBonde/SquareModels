@@ -169,8 +169,10 @@ the dictionary and keeps the original model indices. That is what makes slices
 usable for printing and plotting. A `Window` supports broadcasting (`.=`, `.*`,
 etc.) and iteration, but external libraries may require `collect` or
 `Float64.()` to convert to a plain `Vector`. At the REPL, a multi-dimensional
-`Window` displays as a table (rows for the leading indices, columns for the last
-dimension) via PrettyTables.jl.
+`Window` displays as a table via PrettyTables.jl. The last axis supplies the row
+labels, and each leading-index combination supplies a value column. Sparse
+Windows show stored cells only and leave gaps blank. Numeric and date-like
+last-axis labels sort in ascending order; other labels keep stored-key order.
 
 ## Loading and Saving Data
 

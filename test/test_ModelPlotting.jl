@@ -176,10 +176,10 @@ end
 	@test !occursin("p[:hh, :] * q[:hh, :] + p[:hh, :]", long_print)
 	@test occursin("p[:hh, :] *", long_print)
 	@test occursin("q[:hh, :] +", long_print)
-	@test SquareModels.ModelExpressions._column_label_width(1) == 72
-	@test SquareModels.ModelExpressions._column_label_width(2) > SquareModels.ModelExpressions._column_label_width(8)
+	@test SquareModels._column_label_width(1) == 72
+	@test SquareModels._column_label_width(2) > SquareModels._column_label_width(8)
 	set_column_label_total_width!(100)
-	@test SquareModels.ModelExpressions._column_label_width(1) == 100
+	@test SquareModels._column_label_width(1) == 100
 	set_column_label_total_width!(72)
 	multi_db = @prt((baseline=>shock, baseline), p[:hh, :])
 	@test multi_db.names == ["baseline\np[:hh, :]", "shock\np[:hh, :]"]

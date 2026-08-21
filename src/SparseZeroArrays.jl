@@ -80,6 +80,8 @@ Base.length(indices::SparseIndexPattern) = length(indices.coordinates)
 Base.iterate(indices::SparseIndexPattern, state...) = iterate(indices.coordinates, state...)
 
 _index_tuple(key::Tuple) = key
+_index_tuple(key::JuMP.Containers.DenseAxisArrayKey) = key.I
+_index_tuple(key::CartesianIndex) = Tuple(key)
 _index_tuple(key) = (key,)
 
 _index_pattern(s::SparseZeroArray) =
