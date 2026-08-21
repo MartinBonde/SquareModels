@@ -106,11 +106,19 @@ growth and `:q` for percent deviation from a reference:
 @prt 2020:2060 qGDP                         # default source, selected periods
 ```
 
+In a limited display context such as the REPL, long `@prt` and `Window` tables
+fit the available height. To print all rows, assign the result and show it with
+`:limit => false` in the `IOContext`.
+
 ### Print operators
 
 Operators transform the expression result along its final dimension. In the
 definitions below, ``x_t`` is the source value, ``b_t`` is the reference value,
 and ``\Delta x_t = x_t - x_{t-1}``.
+
+Sparse operators transform stored cells only; gaps remain unstored and print as
+blank cells. Lag operators use the prior displayed period for the same leading
+index combination. If that prior cell is not stored, the result is `NaN`.
 
 Source transformations:
 
@@ -164,14 +172,15 @@ shown once:
 # 2021        1.3             1.4            1.5
 ```
 
-Multi-dimensional results print as a table (rows for the leading indices,
-columns for the last dimension) via PrettyTables.jl, instead of a bare matrix:
+Multi-dimensional results print as a table via PrettyTables.jl. The last axis
+supplies the rows, and each leading-index combination supplies a value column:
 
 ```julia
 @prt data emissions
-#           2020    2021    …    2024
-# [north]   10.0     9.0    …     7.0
-# [south]    6.0     6.0    …     4.0
+# year    emissions[north]    emissions[south]
+# 2020                10.0                 6.0
+# 2021                 9.0                 6.0
+# 2024                 7.0                 4.0
 ```
 
 Multiple expressions in a tuple print together as columns of one table (rows are

@@ -550,7 +550,8 @@ end
     d = ModelDictionary(m)
     w = d[x]
     @test w isa SquareModels.Window
-    @test w.indices isa SparseAxisArray
+    @test w.indices isa SparseZeroArray
+    @test w.indices.domain == x.domain
 
     d[x] .= 1.0
     @test all(d[v] == 1.0 for v in x)

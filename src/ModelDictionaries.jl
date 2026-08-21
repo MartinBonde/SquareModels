@@ -8,7 +8,6 @@ using Dictionaries
 using Parquet2
 using DataFrames
 using CSV
-using PrettyTables: pretty_table
 
 """
     ModelDictionary
@@ -189,7 +188,13 @@ function Base.getindex(d::ModelDictionary, container::AbstractArray{<:AbstractSt
 	data_view = @view(d.dictionary.values[idx])
 	return create_window(data_view, container, varname)
 end
-Base.getindex(d::ModelDictionary, s::SparseZeroArray) = getindex(d, s.data)
+function Base.getindex(d::ModelDictionary, container::SparseZeroArray{<:AbstractVariableRef})
+	add_missing_model_variables!(d)
+	idx = indexin([name(variable) for variable in container], [keys(d.dictionary)...])
+	data_view = @view(d.dictionary.values[idx])
+	varname = isempty(container) ? nothing : split(name(first(container)), "[")[1]
+	return create_window(data_view, container, varname)
+end
 Base.setindex!(d::ModelDictionary, value, s::SparseZeroArray) = setindex!(d, value, s.data)
 
 function Base.getindex(d::ModelDictionary, container::AbstractArray{<:AbstractVariableRef})
@@ -260,6 +265,13 @@ function create_window(data_view, container, varname::Union{Nothing, AbstractStr
 	end
 	Window(data_view, indices, varname)
 end
+function create_window(data_view, container::SparseZeroArray, varname::Union{Nothing, AbstractString}=nothing)
+	indices = similar(container, Int)
+	for (i, key) in enumerate(keys(container))
+		indices[key] = i
+	end
+	return Window(data_view, indices, varname)
+end
 
 function Base.getproperty(w::Window, name::Symbol)
 	name == :shaped_view && return reshape(w.data_view, size(w.indices))
@@ -278,78 +290,47 @@ end
 	Base.iterate,
 	Base.collect,
 )
+Base.iterate(w::Window{<:Any,<:_SparseTableArray}, state...) = iterate(w.data_view, state...)
+Base.collect(w::Window{<:Any,<:_SparseTableArray}) = collect(w.data_view)
 
-_key_to_tuple(k::JuMP.Containers.DenseAxisArrayKey) = k.I
-_key_to_tuple(k::CartesianIndex) = Tuple(k)
-_key_to_tuple(k::Tuple) = k
-_key_to_tuple(k) = (k,)
+_table_layout(w::Window) = _table_layout(w.shaped_view, axes(w.indices))
+function _table_layout(w::Window{<:Any,<:_SparseTableArray})
+	sparse = _sparse_axis_array(w.indices)
+	keys = collect(Base.keys(sparse.data))
+	values = [w.data_view[w.indices[key...]] for key in keys]
+	return _sparse_table_layout(keys, values)
+end
 
-_sparse_keys(s::SparseZeroArray) = keys(s)
-_sparse_keys(s::SparseAxisArray) = keys(s.data)
-
-"""
-    _combo_label(varname, combo)
-
-Row label for a leading-index combination, e.g. `_combo_label("p", (:hh, 2020))
-== "p[hh, 2020]"`. An empty `combo` (1-D data) falls back to the bare `varname`.
-"""
-_combo_label(varname, combo) = isempty(combo) ? varname :
-	(isempty(varname) ? join(combo, ", ") : "$varname[$(join(combo, ", "))]")
-
-"""
-    _labeled_table(io, data, dims, varname)
-
-Print `data` (shaped like `length.(dims)`) as a table via PrettyTables.jl: all
-but the last dimension of `dims` collapse into row labels (e.g.
-`varname[hh, 2020]`), the last dimension becomes the column headers. This is
-the shared renderer behind `Window`'s display and `@prt`'s labelled results.
-"""
-function _labeled_table(io::IO, data::AbstractArray, dims::Tuple, varname)
-	name = varname === nothing ? "" : string(varname)
-	rowdims = dims[1:end-1]
-	combos = vec(collect(Iterators.product(rowdims...)))
-	pretty_table(io, reshape(data, length(combos), length(dims[end]));
-		column_labels=string.(collect(dims[end])),
-		row_labels=[_combo_label(name, c) for c in combos],
-		stubhead_label=name)
+_window_size_label(w::Window{<:Any,<:_SparseTableArray}) = "$(length(w))-element"
+function _window_size_label(w::Window)
+	sizes = length.(axes(w.indices))
+	return length(sizes) == 1 ? "$(only(sizes))-element" : join(sizes, "×")
 end
 
 function Base.show(io::IO, ::MIME"text/plain", w::Window)
 	n = length(w)
-	ax = axes(w.indices)
-	print(io, length(ax) == 1 ? "$n-element" : join(length.(ax), "×"), " Window")
+	print(io, _window_size_label(w), " Window")
 	n == 0 && return
 	println(io, ":")
-	_labeled_table(io, w.shaped_view, ax, w.varname)
-end
-function Base.show(io::IO, ::MIME"text/plain", w::Window{<:Any,<:Union{SparseZeroArray,SparseAxisArray}})
-	n = length(w)
-	print(io, "$n-element Window")
-	n == 0 && return
-	println(io, ":")
-	name = w.varname === nothing ? "" : string(w.varname)
-	max_show = get(io, :limit, false) ? 10 : n
-	half = max_show ÷ 2
-	for (line, key) in enumerate(_sparse_keys(w.indices))
-		if n > max_show && line == half + 1
-			println(io, " ⋮")
-			continue
-		elseif n > max_show && half < line < n - half + 1
-			continue
-		end
-		coordinate = _key_to_tuple(key)
-		print(io, " ", name, "[", join(coordinate, ", "), "] => ", w.data_view[w.indices[coordinate...]])
-		line < n && println(io)
-	end
+	_period_row_table(io, _table_layout(w), something(w.varname, ""))
 end
 Base.show(io::IO, w::Window) = show(io, MIME"text/plain"(), w)
 
 Base.getindex(w::Window, index::AbstractArray) = length(index) == 1 ? getindex(w, index[]) : getindex.(Ref(w), index)
-function Base.getindex(w::Window, indices...)
-	idx = w.indices[indices...]
-	idx isa Integer && return w.data_view[idx]
-	map(i -> w.data_view[i], Array(idx))
+_window_slice(w::Window, index::Integer) = w.data_view[index]
+_window_slice(::Window, zero::Zero) = zero
+_window_slice(w::Window, indices::AbstractArray) = map(i -> w.data_view[i], Array(indices))
+function _window_slice(w::Window, indices::SparseAxisArray)
+	values = similar(indices, eltype(w.data_view))
+	for key in keys(indices.data)
+		values[key] = w.data_view[indices[key]]
+	end
+	return values
 end
+_window_slice(w::Window, indices::SparseZeroArray) =
+	SparseZeroArray(_window_slice(w, indices.data), map(copy, indices.domain))
+
+Base.getindex(w::Window, indices...) = _window_slice(w, w.indices[indices...])
 
 Base.setindex!(w::Window, value, index::AbstractArray) = setindex!.(Ref(w), value, index)
 Base.setindex!(w::Window, value, indices...) = setindex!.(Ref(w.data_view), value, w.indices[indices...])
@@ -358,18 +339,25 @@ Base.setindex!(w::Window, value, indices...) = setindex!.(Ref(w.data_view), valu
 Base.vec(w::Window) = vec(collect(w))
 
 # Broadcasting support for Window - use shaped_view as the broadcastable representation
+Base.broadcastable(w::Window{<:Any,<:_SparseTableArray}) = _window_slice(w, w.indices)
 Base.broadcastable(w::Window) = w.shaped_view
 
 # For broadcast assignment (w .= x), materialize into the underlying data
-function Base.materialize!(w::Window, bc::Base.Broadcast.Broadcasted)
-	result = Base.materialize(bc)
-	if result isa AbstractArray
-		w.data_view .= vec(result)
-	else
-		w.data_view .= result  # scalar broadcast
+function _set_window!(w::Window{<:Any,<:_SparseTableArray}, values::_SparseTableArray)
+	target = _sparse_axis_array(w.indices)
+	source = _sparse_axis_array(values)
+	@assert length(target.data) == length(source.data) &&
+		all(key -> haskey(source.data, key), keys(target.data)) "Sparse Window assignment needs matching stored keys"
+	for key in keys(target.data)
+		w.data_view[target[key...]] = values[key...]
 	end
 	return w
 end
+_set_window!(w::Window, values::AbstractArray) = (w.data_view .= vec(values); w)
+_set_window!(w::Window, value) = (w.data_view .= value; w)
+
+Base.materialize!(w::Window, bc::Base.Broadcast.Broadcasted) =
+	_set_window!(w, Base.materialize(bc))
 
 Base.in(index::String, d::ModelDictionary) = index ∈ keys(d.dictionary)
 Base.in(index::Symbol, d::ModelDictionary) = String(index) ∈ d
@@ -855,7 +843,7 @@ See also: [`load`](@ref), [`read_sparse_array`](@ref)
 """
 function read_variable(path::AbstractString, var; default=nothing, variable=base_name(var))
 	data = _read_simple_keyed(path; variable)
-	return [get(data, _key_to_tuple(key), default) for key in keys(var)]
+	return [get(data, _index_tuple(key), default) for key in keys(var)]
 end
 
 """Load from a DataFrame in simple (variable, indices, value) format."""

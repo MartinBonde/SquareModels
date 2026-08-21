@@ -4,8 +4,11 @@ module ModelExpressions
 
 using Base.Meta: isexpr
 using JuMP: JuMP
-using PrettyTables: pretty_table
-import ..Window
+import ..Window, ..SparseZeroArray, ..SparseAxisArray
+import .._SparseTableArray, .._table_layout, .._period_row_table
+import .._column_label, .._column_labels
+import .._print_table, .._print_period_table, .._COLUMN_LABEL_MIN_WIDTH
+import ..DEFAULT_COLUMN_LABEL_TOTAL_WIDTH, .._order_periods
 
 export @evalexpr, @prt, LabeledArray, MultiVarResult
 export set_default_source!, set_default_operator!, set_default_periods!, set_column_label_total_width!, reset_print_defaults!
@@ -13,28 +16,65 @@ export set_default_source!, set_default_operator!, set_default_periods!, set_col
 """
     LabeledArray(data, dims)
 
-A thin `AbstractArray` wrapper that behaves exactly like `data` for indexing,
-equality, and `Array` conversion, but remembers the per-dimension labels in
-`dims` (e.g. `([:hh, :firm], 2020:2021)`) and an optional expression `name`
-purely for display. `@prt`/`@evalexpr` wrap transformed multi-dimensional
-results in one of these so they still print as a table (rows from the leading
-dimensions, columns from the last) instead of a bare, unlabelled matrix.
+A thin `AbstractArray` wrapper that keeps the indexing and iteration rules of
+`data`, plus an optional expression `name` for display. Dense results keep the
+per-dimension labels in `dims` (e.g. `([:hh, :firm], 2020:2021)`). Sparse
+results keep their sparse container and use its stored keys. `@prt` and
+`@evalexpr` use this type so all array results print as tables. A sparse result
+does not gain a rectangular shape: `size`, `axes`, and `Array` have the same
+limits as its sparse source. For sparse data, the constructor ignores `dims`
+because the container has no declared axis order. `map` returns the source
+array type without labels.
 """
-struct LabeledArray{T, N} <: AbstractArray{T, N}
-	data::Array{T, N}
-	dims::NTuple{N, Any}
+struct LabeledArray{T,N,A<:AbstractArray{T,N},D} <: AbstractArray{T,N}
+	data::A
+	dims::D
 	name::String
+	function LabeledArray{T,N,A,D}(data::A, dims::D, name::String) where {T,N,A<:AbstractArray{T,N},D}
+		return new{T,N,A,D}(data, dims, name)
+	end
 end
-LabeledArray(data::AbstractArray, dims, name="") = LabeledArray(Array(data), Tuple(dims), name)
+function LabeledArray(data::AbstractArray, dims, name="")
+	dense = Array(data)
+	labels = Tuple(dims)
+	return LabeledArray{eltype(dense),ndims(dense),typeof(dense),typeof(labels)}(
+		dense,
+		labels,
+		String(name),
+	)
+end
+_labeled_sparse_array(data::_SparseTableArray, name="") =
+	LabeledArray{eltype(data),ndims(data),typeof(data),Nothing}(data, nothing, String(name))
+LabeledArray(data::_SparseTableArray, dims, name="") = _labeled_sparse_array(data, name)
 
 Base.size(a::LabeledArray) = size(a.data)
+Base.length(a::LabeledArray) = length(a.data)
 Base.getindex(a::LabeledArray, i...) = getindex(a.data, i...)
+Base.keys(a::LabeledArray) = keys(a.data)
+Base.haskey(a::LabeledArray, key) = haskey(a.data, key)
+Base.eachindex(a::LabeledArray) = eachindex(a.data)
+Base.iterate(a::LabeledArray, state...) = iterate(a.data, state...)
+Base.first(a::LabeledArray) = first(a.data)
+Base.broadcastable(a::LabeledArray) = a.data
+Base.similar(a::LabeledArray) = similar(a.data)
+Base.similar(a::LabeledArray, ::Type{T}) where {T} = similar(a.data, T)
+Base.map(f, a::LabeledArray) = map(f, a.data)
+Base.map(f, a::LabeledArray{T,N,A,D}) where {T,N,A<:_SparseTableArray,D} = f.(a.data)
+Base.mapreduce(f, op, a::LabeledArray) = mapreduce(f, op, a.data)
+Base.:(==)(a::LabeledArray, b) = a.data == b
+Base.:(==)(a, b::LabeledArray) = a == b.data
+Base.:(==)(a::LabeledArray, b::AbstractArray) = a.data == b
+Base.:(==)(a::AbstractArray, b::LabeledArray) = a == b.data
+Base.:(==)(a::LabeledArray, b::LabeledArray) = a.data == b.data
+Base.IteratorSize(::Type{LabeledArray{T,N,A,D}}) where {T,N,A<:_SparseTableArray,D} = Base.HasLength()
 
-Base.show(io::IO, ::MIME"text/plain", a::LabeledArray) = _period_row_table(io, a.data, a.dims, a.name)
+_labeled_layout(a::LabeledArray) = a.dims === nothing ? _table_layout(a.data) : _table_layout(a.data, a.dims)
+Base.show(io::IO, ::MIME"text/plain", a::LabeledArray) = _period_row_table(io, _labeled_layout(a), a.name)
 Base.show(io::IO, a::LabeledArray) = show(io, MIME"text/plain"(), a)
 
 """Axis label collections for `x`, or `nothing` when `x` carries no labels."""
 _axis_labels(x::JuMP.Containers.DenseAxisArray) = axes(x)
+_axis_labels(x::Window{<:Any,<:_SparseTableArray}) = nothing
 _axis_labels(x::Window) = axes(x.indices)
 _axis_labels(_) = nothing
 
@@ -44,6 +84,7 @@ function _relabel(result::AbstractArray, x, name="")
 	(dims === nothing || ndims(result) != length(dims)) && return result
 	return LabeledArray(result, dims, name)
 end
+_relabel(result::_SparseTableArray, x, name="") = _labeled_sparse_array(result, name)
 _relabel(result, x, name="") = result
 
 """
@@ -52,8 +93,9 @@ _relabel(result, x, name="") = result
 Result of printing several expressions together, e.g. `@prt data (qGDP, pGDP)`.
 Behaves like the underlying `values` tuple for equality, iteration, and
 indexing, but displays as a single PrettyTables.jl table with one column per
-name when every value is a scalar or carries the same final-dimension labels;
-falls back to printing each value under its own heading otherwise.
+name when every value is a scalar. Array results use the union of their
+final-dimension labels and leave absent display cells blank. Other values print
+under separate headings.
 """
 struct MultiVarResult{T<:Tuple}
 	names::Vector{String}
@@ -69,79 +111,38 @@ Base.length(a::MultiVarResult) = length(a.values)
 Base.iterate(a::MultiVarResult, state...) = iterate(a.values, state...)
 Base.getindex(a::MultiVarResult, i) = a.values[i]
 
-_dims_of(x::LabeledArray) = x.dims
-_dims_of(::Number) = ()
-_dims_of(x) = _axis_labels(x)
-
-_data_of(x::LabeledArray) = x.data
-_data_of(x::Window) = x.shaped_view
-_data_of(x::AbstractArray) = Array(x)
-_data_of(x::Number) = [x]
-
-const _COLUMN_LABEL_MIN_WIDTH = 10
-const DEFAULT_COLUMN_LABEL_TOTAL_WIDTH = Ref(72)
-
 _table_label(source, expr) = string(source, '\n', _expr_label(expr))
 
-_leading_combos(dims) = length(dims) == 1 ? [()] : vec(collect(Iterators.product(dims[1:end-1]...)))
-_column_label(name, combo) = isempty(combo) ? name : (isempty(name) ? join(combo, ", ") : "$name[$(join(combo, ", "))]")
+_layout_of(x::LabeledArray) = _labeled_layout(x)
+_layout_of(x::Window) = _table_layout(x)
+_layout_of(x::JuMP.Containers.DenseAxisArray) = _table_layout(Array(x), axes(x))
+_layout_of(x::_SparseTableArray) = _table_layout(x)
+_layout_of(_) = nothing
 
-function _source_expr_parts(name)
-	parts = split(name, '\n', limit=2)
-	length(parts) == 1 && return nothing
-	return (parts[1], parts[2])
-end
+_combined_periods(layouts) = _order_periods(unique(period for layout in layouts for period in layout.periods))
 
-_column_label_width(ncols) = max(_COLUMN_LABEL_MIN_WIDTH, DEFAULT_COLUMN_LABEL_TOTAL_WIDTH[] ÷ max(ncols, 1))
-
-function _wrap_label(label, width)
-	isempty(label) && return [""]
-	n = length(label)
-	n <= width && return [label]
-	return [label[i:min(i + width - 1, n)] for i in 1:width:n]
-end
-
-# PrettyTables `auto_wrap` crops column labels with an ellipsis rather than
-# adding label rows, and `line_breaks` does not split `\n` inside labels.
-function _column_labels(labels)
-	splits = _source_expr_parts.(labels)
-	width = _column_label_width(length(labels))
-	wrapped = [_wrap_label(isnothing(s) ? label : s[2], width) for (label, s) in zip(labels, splits)]
-	n = maximum(length, wrapped)
-	rows = [[i <= length(w) ? w[i] : "" for w in wrapped] for i in 1:n]
-	any(!isnothing, splits) && pushfirst!(rows, [isnothing(s) ? "" : s[1] for s in splits])
-	return rows
-end
-
-function _period_row_table(io::IO, data, dims, name="")
-	periods = collect(dims[end])
-	combos = _leading_combos(dims)
-	mat = permutedims(reshape(data, length(combos), length(periods)))
-	pretty_table(io, mat;
-		column_labels=_column_labels([_column_label(name, c) for c in combos]),
-		row_labels=string.(periods),
-		stubhead_label="year",
-		fit_table_in_display_vertically=false)
+function _align_periods(layout, periods)
+	rows = [findfirst(value -> isequal(value, period), layout.periods) for period in periods]
+	all(!isnothing, rows) && return layout.data[[row::Int for row in rows], :]
+	aligned = fill!(Matrix{Any}(undef, length(periods), size(layout.data, 2)), "")
+	for (target, source) in enumerate(rows)
+		source === nothing || (aligned[target, :] = layout.data[source, :])
+	end
+	return aligned
 end
 
 function Base.show(io::IO, ::MIME"text/plain", r::MultiVarResult)
-	dims = _dims_of.(r.values)
-	if all(==(()), dims)
-		mat = reduce(hcat, vec(_data_of(v)) for v in r.values)
-		pretty_table(io, mat;
-			column_labels=_column_labels(r.names),
-			fit_table_in_display_vertically=false)
-	elseif all(d -> d !== nothing && !isempty(d), dims) && all(d -> collect(d[end]) == collect(first(dims)[end]), dims)
-		periods = collect(first(dims)[end])
-		combos = _leading_combos.(dims)
-		mats = [permutedims(reshape(_data_of(v), length(c), length(periods))) for (v, c) in zip(r.values, combos)]
-		labels = [_column_label(name, c) for (name, cs) in zip(r.names, combos) for c in cs]
-		pretty_table(io, reduce(hcat, mats);
-			column_labels=_column_labels(labels),
-			row_labels=string.(periods),
-			stubhead_label="year",
-			fit_table_in_display_vertically=false)
+	if all(v -> v isa Number, r.values)
+		mat = reduce(hcat, [v] for v in r.values)
+		_print_table(io, mat; column_labels=_column_labels(r.names))
 	else
+		layouts = _layout_of.(r.values)
+		if all(layout -> layout !== nothing && !isempty(layout.combos), layouts)
+			periods = _combined_periods(layouts)
+			aligned = [_align_periods(layout, periods) for layout in layouts]
+			labels = [_column_label(name, combo) for (name, layout) in zip(r.names, layouts) for combo in layout.combos]
+			return _print_period_table(io, reduce(hcat, aligned), periods, labels)
+		end
 		for (i, (name, v)) in enumerate(zip(r.names, r.values))
 			i > 1 && println(io)
 			println(io, name)
@@ -302,6 +303,35 @@ _to_float(x) = (x === nothing || x === _NA) ? NaN : Float64(x)
 _as_numeric(x::Number) = Float64(x)
 _as_numeric(x) = [_to_float(v) for v in Array(x)]
 
+_stored_pairs(x::SparseAxisArray) = x.data
+_stored_pairs(x::SparseZeroArray) = _stored_pairs(x.data)
+_stored_get(x::SparseAxisArray, key, default) = get(x.data, key, default)
+_stored_get(x::SparseZeroArray, key, default) = _stored_get(x.data, key, default)
+
+function _rebuild_sparse(x::SparseAxisArray, data)
+	return SparseAxisArray(data, x.names)
+end
+_rebuild_sparse(x::SparseZeroArray, data) =
+	SparseZeroArray(_rebuild_sparse(x.data, data), map(copy, x.domain))
+
+function _map_stored(f, x::_SparseTableArray)
+	stored = _stored_pairs(x)
+	data = JuMP.Containers.OrderedCollections.OrderedDict{keytype(stored),Any}()
+	for (key, value) in stored
+		data[key] = f(key, value)
+	end
+	return _rebuild_sparse(x, data)
+end
+
+_as_numeric(x::_SparseTableArray) = _map_stored((key, value) -> _to_float(value), x)
+_as_numeric(x::LabeledArray{T,N,A,D}) where {T,N,A<:_SparseTableArray,D} = _as_numeric(x.data)
+
+function _zip_stored(f, x::_SparseTableArray, y::_SparseTableArray)
+	return _map_stored(x) do key, value
+		f(_to_float(value), _to_float(_stored_get(y, key, nothing)))
+	end
+end
+
 function _lag1(a::AbstractArray)
 	out = similar(a, Float64)
 	fill!(out, NaN)
@@ -314,11 +344,36 @@ function _lag1(a::AbstractArray)
 end
 _lag1(::Number) = NaN
 
+function _lag1(x::_SparseTableArray)
+	periods = _order_periods(unique(key[end] for key in keys(_stored_pairs(x))))
+	period_index = Dict(period => i for (i, period) in enumerate(periods))
+	return _map_stored(x) do key, value
+		position = period_index[key[end]]
+		position == 1 && return NaN
+		previous_key = (Base.front(key)..., periods[position - 1])
+		return _to_float(_stored_get(x, previous_key, nothing))
+	end
+end
+
 _dif(x) = (a = _as_numeric(x); a .- _lag1(a))
 _pch(x) = (a = _as_numeric(x); (a ./ _lag1(a) .- 1) .* 100)
 _gdif(x) = _dif(_pch(x))
 _log(x) = log.(_as_numeric(x))
 _ldif(x) = _dif(_log(x))
+
+_dif(x::_SparseTableArray) = (a = _as_numeric(x); _zip_stored(-, a, _lag1(a)))
+_pch(x::_SparseTableArray) = (a = _as_numeric(x); _zip_stored((v, lag) -> (v / lag - 1) * 100, a, _lag1(a)))
+_gdif(x::_SparseTableArray) = _dif(_pch(x))
+_log(x::_SparseTableArray) = _map_stored((key, value) -> log(_to_float(value)), x)
+_ldif(x::_SparseTableArray) = _dif(_log(x))
+
+_difference(x, ref) = _as_numeric(x) .- _as_numeric(ref)
+_difference(x::_SparseTableArray, ref::_SparseTableArray) = _zip_stored(-, x, ref)
+_deviation(x, ref) = (_as_numeric(x) ./ _as_numeric(ref) .- 1) .* 100
+_deviation(x::_SparseTableArray, ref::_SparseTableArray) =
+	_zip_stored((value, base) -> (value / base - 1) * 100, x, ref)
+_growth_difference(x, ref) = _pch(x) .- _pch(ref)
+_growth_difference(x::_SparseTableArray, ref::_SparseTableArray) = _zip_stored(-, _pch(x), _pch(ref))
 
 function _need_ref(op)
 	op in (:m, :q, :mp, :r, :rn, :rd, :rp, :rdp, :rl, :rdl)
@@ -379,9 +434,9 @@ function _transform(op::Symbol, x, ref=nothing, name="")
 	op == :l && return _relabel(_log(x), x, name)
 	op == :dl && return _relabel(_ldif(x), x, name)
 	ref = _ref_value(ref, op)
-	op == :m && return _relabel(_as_numeric(x) .- _as_numeric(ref), x, name)
-	op == :q && return _relabel((_as_numeric(x) ./ _as_numeric(ref) .- 1) .* 100, x, name)
-	op == :mp && return _relabel(_pch(x) .- _pch(ref), x, name)
+	op == :m && return _relabel(_difference(x, ref), x, name)
+	op == :q && return _relabel(_deviation(x, ref), x, name)
+	op == :mp && return _relabel(_growth_difference(x, ref), x, name)
 	op in (:r, :rn) && return _relabel(ref, ref, name)
 	op == :rd && return _relabel(_dif(ref), ref, name)
 	op == :rp && return _relabel(_pch(ref), ref, name)
@@ -426,6 +481,10 @@ function _lookup(db, name::Symbol, fallback, periods=nothing)
 	return _with_periods(_model_binding(db, name), periods)
 end
 _value(db, x) = _restore_nothing(JuMP.value(v -> _nothing_to_na(db[v]), x))
+_value(db, x::SparseZeroArray{<:Number}) = x
+_value(db, x::SparseZeroArray) = SparseZeroArray(_value(db, x.data), map(copy, x.domain))
+_value(db, x::SparseAxisArray{<:Number}) = x
+_value(db, x::SparseAxisArray) = _map_stored((key, value) -> _value(db, value), x)
 _value(db, x::AbstractArray{<:Number}) = x
 _value(db, x::Tuple) = map(y -> _value(db, y), x)
 

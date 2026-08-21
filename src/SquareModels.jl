@@ -46,6 +46,7 @@ const _name_lookup_cache = WeakKeyDict{AbstractModel, Dict{String, VariableRef}}
 include("errors.jl")
 include("utils.jl")
 include("SparseZeroArrays.jl")
+include("TableDisplay.jl")
 
 """
     AbstractSeries
@@ -703,6 +704,124 @@ function _index_var(var, k::Tuple)
 	_ndims(var) == length(fk) ? var[fk...] : var[k...]
 end
 
+"""Return stored keys when a sparse mapped variable has the stated number of axes."""
+_mapped_sparse_constraint_keys(_, ::Val) = nothing
+_mapped_sparse_constraint_keys(var::SparseAxisArray{T,N}, ::Val{N}) where {T,N} = keys(var.data)
+_mapped_sparse_constraint_keys(var::SparseZeroArray{T,N}, ::Val{N}) where {T,N} = keys(var)
+
+"""Parse one scalar named index such as `i = I` or `i in I`."""
+function _named_constraint_axis(axis)
+	if (isexpr(axis, :kw) || isexpr(axis, :(=))) && axis.args[1] isa Symbol
+		return axis.args[1], axis.args[2]
+	elseif isexpr(axis, :call) && length(axis.args) == 3 &&
+	       axis.args[1] in (:in, :∈) && axis.args[2] isa Symbol
+		return axis.args[2], axis.args[3]
+	end
+	return nothing
+end
+
+_constraint_expr_uses_symbol(symbol::Symbol, names) = symbol in names
+_constraint_expr_uses_symbol(expr::Expr, names) =
+	any(arg -> _constraint_expr_uses_symbol(arg, names), expr.args)
+_constraint_expr_uses_symbol(_, _) = false
+
+"""Return named axes and a semicolon filter, or `nothing` for other JuMP index forms."""
+function _named_constraint_indices(ref_vars)
+	isexpr(ref_vars, :ref) || isexpr(ref_vars, :typed_vcat) || return nothing
+	axes = Any[ref_vars.args[2:end]...]
+	condition = nothing
+
+	if isexpr(ref_vars, :typed_vcat)
+		length(axes) <= 2 || return nothing
+		length(axes) == 2 && (condition = pop!(axes))
+	else
+		parameters = findall(axis -> isexpr(axis, :parameters), axes)
+		length(parameters) <= 1 || return nothing
+		if !isempty(parameters)
+			parameter = axes[only(parameters)]
+			length(parameter.args) == 1 || return nothing
+			condition = only(parameter.args)
+			deleteat!(axes, only(parameters))
+		end
+	end
+
+	isempty(axes) && return nothing
+	parsed = map(_named_constraint_axis, axes)
+	any(isnothing, parsed) && return nothing
+	names = first.(parsed)
+	allunique(names) || return nothing
+	return names, last.(parsed), condition
+end
+
+"""Wrap a named-axis value so `in` treats a scalar as a one-element set."""
+_axis_collection(axis::AbstractString) = (axis,)
+_axis_collection(axis::Symbol) = (axis,)
+_axis_collection(axis) = applicable(iterate, axis) ? axis : (axis,)
+
+"""Build the normal JuMP indices and an optional stored-key form for a mapped variable."""
+function _constraint_index_plan(ref_vars, stored_keys)
+	indices = Expr(isexpr(ref_vars, :ref) ? :vect : :vcat, ref_vars.args[2:end]...)
+	parsed = _named_constraint_indices(ref_vars)
+	parsed === nothing && return indices, nothing, nothing
+
+	names, values, condition = parsed
+	bound_values = Any[]
+	bindings = Pair{Symbol,Any}[]
+	prior_names = Symbol[]
+	axis_collection = GlobalRef(@__MODULE__, :_axis_collection)
+	for (name, value) in zip(names, values)
+		if _constraint_expr_uses_symbol(value, prior_names)
+			push!(bound_values, value)
+		else
+			bound_value = gensym(name)
+			push!(bound_values, bound_value)
+			push!(bindings, bound_value => value)
+		end
+		push!(prior_names, name)
+	end
+	checks = Any[
+		Expr(:call, :in, name, Expr(:call, axis_collection, value))
+		for (name, value) in zip(names, bound_values)
+	]
+	condition === nothing || push!(checks, condition)
+	filter_condition = reduce((left, right) -> Expr(:&&, left, right), checks)
+	key_names = Expr(:tuple, names...)
+	sparse_indices = Expr(:vcat, Expr(:call, :in, key_names, stored_keys), filter_condition)
+	return indices, sparse_indices, (length(names), bindings)
+end
+
+_expression_macrocall(jump_expression, source, indices, expr) =
+	Expr(:macrocall, jump_expression, source, :_m, indices, expr)
+
+"""Assign `@expression(_m, indices, expr)` for each name => expr pair."""
+function _named_index_expression_code(ref_vars, jump_expression, source, assigns::Pair...)
+	stored_keys = gensym(:stored_keys)
+	indices, sparse_indices, sparse_plan = _constraint_index_plan(ref_vars, stored_keys)
+	dense_block = Expr(:block, (
+		:($(lhs) = $(_expression_macrocall(jump_expression, source, indices, rhs)))
+		for (lhs, rhs) in assigns
+	)...)
+	sparse_plan === nothing && return dense_block
+
+	arity, bindings = sparse_plan
+	mapped_sparse_keys_ref = GlobalRef(@__MODULE__, :_mapped_sparse_constraint_keys)
+	val_ref = GlobalRef(Base, :Val)
+	sparse_setup = Expr(:block, (:(local $name = $value) for (name, value) in bindings)...)
+	sparse_block = Expr(:block, (
+		:($(lhs) = $(_expression_macrocall(jump_expression, source, sparse_indices, rhs)))
+		for (lhs, rhs) in assigns
+	)...)
+	quote
+		$stored_keys = $mapped_sparse_keys_ref($(_get_name(ref_vars)), $val_ref($arity))
+		if $stored_keys === nothing
+			$dense_block
+		else
+			$sparse_setup
+			$sparse_block
+		end
+	end
+end
+
 """Extract the JuMP model from a container (ModelDictionary or Model)"""
 _get_model(m::AbstractModel) = m
 # _get_model for ModelDictionary is defined after ModelDictionaries.jl is included
@@ -747,13 +866,12 @@ macro _block(container, ref_vars, constraint, extra...)
 			end
 		end
 	elseif isexpr(ref_vars, :ref) || isexpr(ref_vars, :typed_vcat)
-		indices = Expr(isexpr(ref_vars, :ref) ? :vect : :vcat, ref_vars.args[2:end]...)
-		lhs_call = Expr(:macrocall, jump_expression, __source__, :_m, indices, lhs)
-		rhs_call = Expr(:macrocall, jump_expression, __source__, :_m, indices, rhs)
+		expr_code = _named_index_expression_code(
+			ref_vars, jump_expression, __source__, :_lhs => lhs, :_rhs => rhs,
+		)
 		macrocall = quote
 			let _m = $model_expr
-				_lhs = $lhs_call
-				_rhs = $rhs_call
+				$expr_code
 				_ks = $all_keys_ref(_lhs)
 				endos = [$index_var_ref($base_sym, k) for k in _ks]
 				resids = [$residual_for_ref(endo) for endo in endos]
@@ -808,11 +926,12 @@ macro _test_constraint(container, ref_vars, constraint, message, atol, rtol)
 			end
 		end
 	elseif isexpr(ref_vars, :ref) || isexpr(ref_vars, :typed_vcat)
-		indices = Expr(isexpr(ref_vars, :ref) ? :vect : :vcat, ref_vars.args[2:end]...)
-		expression_call = Expr(:macrocall, jump_expression, __source__, :_m, indices, diff_expr)
+		expr_code = _named_index_expression_code(
+			ref_vars, jump_expression, __source__, :_exprs => diff_expr,
+		)
 		macrocall = quote
 			let _m = $model_expr
-				_exprs = $expression_call
+				$expr_code
 				_ks = $all_keys_ref(_exprs)
 				[$test_constraint_ref(
 					$index_var_ref($base_sym, k),

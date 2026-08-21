@@ -13,6 +13,20 @@ block = @block data begin
 end
 ```
 
+For a sparse mapped variable, standard named index syntax creates constraints
+only for stored variable cells. It first limits those cells to the named axis
+sets, then applies the filter after `;`. `@test_constraint` uses the same rule:
+
+```julia
+block = @block data begin
+    x[i=I, j=J, t=T; t > t₀], x[i, j, t] == y[i, j, t]
+end
+```
+
+Dense mapped variables still use the full product of the named axis sets. The
+explicit tuple-key form, such as
+`x[(i, j, t) in keys(x); t > t₀]`, also stays valid.
+
 Blocks can be combined with `+` as long as they belong to the same JuMP model and
 do not determine the same endogenous variable twice:
 
@@ -104,16 +118,29 @@ end
 The left-hand variable becomes endogenous. The right-hand variable must already
 be endogenous in the block and becomes exogenous data.
 
-Use the same indexed form as `@block` to swap a subset. The indexed left side
-sets the indices for both variables:
+Use the same indexed form as `@block` to select cells on each side:
 
 ```julia
 @endo_exo_swap! calibration begin
-    share[(i, t) in keys(output); t == t₀], output[i, t]
+    share[i = I, t = t₀], output[i = I, t = t₀]
 end
 ```
 
-The form supports named indices, tuple-key sets, and a filter after `;`.
+Each side selects its own cells. The macro pairs the selected variables in
+iteration order and requires the two selections to have the same length.
+Named indices on a sparse variable select only its stored cells.
+
+Use `keys` when one side must explicitly reuse the other side's stored
+coordinates:
+
+```julia
+@endo_exo_swap! calibration begin
+    share[i = I, t = t₀], output[(i, t) in keys(share[i = I, t = t₀])]
+    share[(i, t) in keys(output); t == t₀], output[:, t₀]
+end
+```
+
+The form supports named indices, tuple-key sets, slices, and a filter after `;`.
 
 ## Model Dictionaries
 
@@ -140,10 +167,14 @@ data[y[:electric, 2025:2060]] .= 0.8
 Indexing a variable container returns a `Window`, which behaves like a view into
 the dictionary and keeps the original model indices. That is what makes slices
 usable for printing and plotting. A `Window` supports broadcasting (`.=`, `.*`,
-etc.) and iteration, but external libraries may require `collect` or
-`Float64.()` to convert to a plain `Vector`. At the REPL, a multi-dimensional
-`Window` displays as a table (rows for the leading indices, columns for the last
-dimension) via PrettyTables.jl.
+etc.) and iteration. `collect` keeps the shape of a dense `Window` and returns
+the stored values of a sparse `Window` as a vector in key order. At the REPL, a
+multi-dimensional `Window` displays as a table via PrettyTables.jl. The last axis
+supplies the row labels, and each leading-index combination supplies a value
+column. Sparse Windows and their slices keep their sparse container and domain.
+Sparse assignment matches stored cells by key. Sparse tables show stored cells
+only and leave gaps blank. Numeric and date-like last-axis labels sort in
+ascending order; other labels keep stored-key order.
 
 ## Loading and Saving Data
 

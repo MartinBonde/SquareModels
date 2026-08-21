@@ -1,6 +1,7 @@
 module TestModelDictionaries
 
 using Test
+using Dates
 using JuMP
 using SquareModels
 using Dictionaries
@@ -37,45 +38,177 @@ end
 	b[x] = 1
 	@test sprint(show, MIME"text/plain"(), b) == "ModelDictionary with 21 entries (1 assigned, 20 unset)"
 	@test sprint(show, ModelDictionary(Model())) == "ModelDictionary with 0 entries"
+	@test startswith(sprint(show, MIME"text/plain"(), b[z]), "5×3 Window:\n")
 end
 
 @testset "Sparse ModelDictionary display" begin
 	sparse_model = Model()
-	stored = [(:a, :x), (:b, :y)]
+	stored = [(:a, :x, 1), (:a, :x, 2), (:b, :y, 1)]
 	SquareModels.@variables sparse_model begin
-		s[i = [:a, :b], j = [:x, :y], t = 1:2; (i, j) in stored]
+		s[i = [:a, :b], j = [:x, :y], t = 1:2; (i, j, t) in stored]
+		s_copy[(i, j, t) = s]
 		empty_s[i = [:a]; i in Symbol[]]
 	end
-	b = ModelDictionary(sparse_model, collect(1.0:length(s)))
+	b = ModelDictionary(sparse_model)
+	b[s] .= collect(1.0:length(s))
+	b[s_copy] .= 0.0
 	w = b[s]
 
 	@test s isa SparseZeroArray
-	@test w.indices isa JuMP.Containers.SparseAxisArray
-	output = sprint(show, MIME"text/plain"(), w)
-	@test startswith(output, "4-element Window:\n")
-	@test all(
-		occursin(" s[$i, $j, $t] => $(b[s[i, j, t]])", output)
-		for (i, j) in stored for t in 1:2
+	@test w.indices isa SparseZeroArray
+	@test w.indices.domain == s.domain
+	stored_values = [b[s[key...]] for key in keys(s)]
+	@test collect(w) == stored_values
+	@test [value for value in w] == stored_values
+	full = w[:, :, :]
+	@test full isa SparseZeroArray
+	@test full.domain == s.domain
+	@test collect(keys(full)) == collect(keys(s))
+	@test full[:a, :x, 2] == b[s[:a, :x, 2]]
+	@test full[:b, :x, 2] isa SquareModels.Zero
+	b[s_copy] .= full
+	@test all(b[s_copy[key...]] == b[s[key...]] for key in keys(s))
+	b[s_copy] .= w
+	@test all(b[s_copy[key...]] == b[s[key...]] for key in keys(s))
+	reversed = SparseZeroArray(
+		JuMP.Containers.SparseAxisArray(JuMP.Containers.OrderedCollections.OrderedDict(
+			key => b[s[key...]] for key in reverse(collect(keys(s)))
+		)),
+		map(copy, s.domain),
 	)
-	@test b[empty_s].indices isa JuMP.Containers.SparseAxisArray
+	b[s_copy] .= reversed
+	@test all(b[s_copy[key...]] == b[s[key...]] for key in keys(s))
+	output = sprint(show, MIME"text/plain"(), w)
+	@test startswith(output, "3-element Window:\n")
+	@test sprint(show, MIME"text/plain"(), b[:s]) == output
+	@test occursin("year", output)
+	@test occursin("s[a, x]", output)
+	@test occursin("s[b, y]", output)
+	@test !occursin("=>", output)
+	@test SquareModels._table_layout(w).data[2, 2] == ""
+	printed = @prt(b, s)
+	@test printed isa LabeledArray
+	@test printed.data isa SparseZeroArray
+	@test collect(keys(printed.data)) == collect(keys(s))
+	@test printed.data.domain == s.domain
+	@test printed[:b, :x, 2] isa SquareModels.Zero
+	public_labeled = LabeledArray(printed.data, (:ignored,), "s")
+	@test public_labeled.data === printed.data
+	@test public_labeled.dims === nothing
+	@test public_labeled[:b, :x, 2] isa SquareModels.Zero
+	@test map(identity, printed) isa SparseZeroArray
+	@test similar(printed, Float64) isa SparseZeroArray
+	difference = @prt(:d, b, s)
+	@test isnan(difference[:a, :x, 1])
+	@test difference[:a, :x, 2] == 1.0
+	@test difference[:b, :x, 2] isa SquareModels.Zero
+	@test (@prt(:p, b, s))[:a, :x, 2] == 100.0
+	@test (@prt(:q, b => b, s))[:a, :x, 2] == 0.0
+	@test split(output, '\n'; limit=2)[2] == sprint(show, MIME"text/plain"(), printed)
+	@test b[empty_s].indices isa SparseZeroArray
+	@test b[empty_s].indices.domain == empty_s.domain
 	@test sprint(show, MIME"text/plain"(), b[empty_s]) == "0-element Window"
+	@test sprint(show, MIME"text/plain"(), @prt(b, empty_s)) == "0-element table"
+	@test SquareModels._wrap_label("αβγδε", 2) == ["αβ", "γδ", "ε"]
+
+	unsorted = SquareModels._sparse_table_layout([(:a, 2), (:a, 1)], [2.0, 1.0])
+	@test unsorted.periods == [1, 2]
+	reordered = SquareModels._sparse_table_layout([(:a, 1), (:a, 2)], [10.0, 20.0])
+	@test SquareModels.ModelExpressions._align_periods(reordered, unsorted.periods) == [10.0; 20.0;;]
+	@test SquareModels._order_periods([Date(2025), Date(2024)]) == [Date(2024), Date(2025)]
+	@test SquareModels._order_periods([:b, :a]) == [:b, :a]
+	OrderedDict = JuMP.Containers.OrderedCollections.OrderedDict
+	left = JuMP.Containers.SparseAxisArray(OrderedDict([(:a, 2) => 2.0, (:a, 1) => 1.0]))
+	right = JuMP.Containers.SparseAxisArray(OrderedDict([(:a, 1) => 10.0, (:a, 2) => 20.0]))
+	labeled = SquareModels.ModelExpressions._labeled_sparse_array
+	joined = MultiVarResult(["left", "right"], (labeled(left), labeled(right)))
+	joined_output = sprint(show, MIME"text/plain"(), joined)
+	@test count("year", joined_output) == 1
+	@test occursin(r"│\s*2\s*│\s*2\.0\s*│\s*20\.0\s*│", joined_output)
+	extra = JuMP.Containers.SparseAxisArray(OrderedDict([(:a, 1) => 10.0, (:a, 3) => 30.0]))
+	padded = MultiVarResult(["left", "extra"], (labeled(left), labeled(extra)))
+	padded_output = sprint(show, MIME"text/plain"(), padded)
+	@test count("year", padded_output) == 1
+	@test SquareModels.ModelExpressions._combined_periods(
+		SquareModels.ModelExpressions._layout_of.(padded.values),
+	) == [1, 2, 3]
+	@test occursin(r"│[ ]*2[ ]*│[ ]*2\.0[ ]*│[ ]*│", padded_output)
+	@test occursin(r"│[ ]*3[ ]*│[ ]*│[ ]*30\.0[ ]*│", padded_output)
+	dense = LabeledArray([2.0, 1.0], ([2, 1],), "dense")
+	mixed = MultiVarResult(["dense", "extra"], (dense, labeled(extra)))
+	mixed_output = sprint(show, MIME"text/plain"(), mixed)
+	@test count("year", mixed_output) == 1
+	@test SquareModels.ModelExpressions._combined_periods(
+		SquareModels.ModelExpressions._layout_of.(mixed.values),
+	) == [1, 2, 3]
 
 	use_sparse_zero_array!(false)
 	try
 		SquareModels.@variables sparse_model begin
-			p[i = [:a, :b], j = [:x, :y]; (i, j) in stored]
+			p[i = [:a, :b], j = [:x, :y], t = 1:2; (i, j, t) in stored]
+			empty_p[i = [:a]; i in Symbol[]]
 		end
 		add_missing_model_variables!(b)
-		b[p] .= [5.0, 6.0]
+		b[p] .= collect(1.0:length(p))
 		plain = b[p]
 		@test p isa JuMP.Containers.SparseAxisArray
 		@test plain.indices isa JuMP.Containers.SparseAxisArray
-		output = sprint(show, MIME"text/plain"(), plain)
-		@test startswith(output, "2-element Window:\n")
-		@test all(occursin(" p[$i, $j] => $(b[p[i, j]])", output) for (i, j) in stored)
+		@test collect(plain) == [b[p[key...]] for key in keys(p.data)]
+		plain_full = plain[:, :, :]
+		@test plain_full isa JuMP.Containers.SparseAxisArray
+		@test collect(keys(plain_full.data)) == collect(keys(p.data))
+		@test all(plain_full[key...] == b[p[key...]] for key in keys(p.data))
+		plain_output = sprint(show, MIME"text/plain"(), plain)
+		@test startswith(plain_output, "3-element Window:\n")
+		@test SquareModels._table_layout(plain).data[2, 2] == ""
+		@test replace(output, "s[" => "v[") == replace(plain_output, "p[" => "v[")
+		plain_printed = @prt(b, p)
+		@test plain_printed.data isa JuMP.Containers.SparseAxisArray
+		@test plain_printed.data.names == p.names
+		@test collect(keys(plain_printed.data.data)) == collect(keys(p.data))
+		@test split(plain_output, '\n'; limit=2)[2] == sprint(show, MIME"text/plain"(), plain_printed)
+		@test (@prt(:p, b, p))[:a, :x, 2] == 100.0
+		@test all((@prt(:q, b => b, p))[key...] == 0.0 for key in keys(p.data))
+		empty_plain = @prt(:p, b, empty_p)
+		@test empty_plain.data isa JuMP.Containers.SparseAxisArray
+		@test isempty(empty_plain.data.data)
+		joint = @prt(b, (s, p))
+		@test joint isa MultiVarResult
+		@test all(value -> value isa LabeledArray, joint)
+		joint_output = sprint(show, MIME"text/plain"(), joint)
+		@test count("year", joint_output) == 1
+		@test occursin("s[a, x]", joint_output)
+		@test occursin("p[a, x]", joint_output)
 	finally
 		use_sparse_zero_array!(true)
 	end
+
+	one_model = Model()
+	SquareModels.@variables one_model begin
+		one[t = 1:3; t != 2]
+		long[t = 1:30; isodd(t)]
+	end
+	one_db = ModelDictionary(one_model)
+	one_db[one] .= [1.0, 3.0]
+	one_db[long] .= collect(1.0:length(long))
+	one_layout = SquareModels._table_layout(one_db[one])
+	@test one_layout.combos == [()]
+	@test one_layout.periods == [1, 3]
+	@test occursin("year", sprint(show, MIME"text/plain"(), @prt(one_db, one)))
+
+	buffer = IOBuffer()
+	limited_io = IOContext(buffer, :limit => true, :displaysize => (8, 80))
+	show(limited_io, MIME"text/plain"(), one_db[long])
+	limited = String(take!(buffer))
+	unlimited = sprint(show, MIME"text/plain"(), one_db[long])
+	@test count('\n', limited) < count('\n', unlimited)
+
+	buffer = IOBuffer()
+	limited_io = IOContext(buffer, :limit => true, :displaysize => (8, 80))
+	show(limited_io, MIME"text/plain"(), @prt(one_db, long))
+	limited_prt = String(take!(buffer))
+	unlimited_prt = sprint(show, MIME"text/plain"(), @prt(one_db, long))
+	@test count('\n', limited_prt) < count('\n', unlimited_prt)
 end
 
 @testset "Test getting and setting single variables refs" begin

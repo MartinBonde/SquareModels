@@ -397,7 +397,7 @@ end
 		end
 
 		@endo_exo_swap! b begin
-			z_exo[(i, t) in selected; t > 1], z[i, t]
+			z_exo[(i, t) in selected; t > 1], z[(i, t) in selected; t > 1]
 		end
 
 		expected = vec([
@@ -409,9 +409,39 @@ end
 		b = @block m begin
 			z[i = 1:2, t = 1:3], z[i, t] + z_exo[i, t] == 1
 		end
-		@endo_exo_swap!(b, z_exo[(i, t) in selected; t > 1], z[i, t])
+		@endo_exo_swap!(b, z_exo[(i, t) in selected; t > 1], z[(i, t) in selected; t > 1])
 		@test endogenous(b) == expected
 	end
+end
+
+@testset "@endo_exo_swap! selects each indexed variable" begin
+	stored = Set([(1, 1), (1, 2), (2, 2), (3, 1)])
+	m = Model()
+	SquareModels.@variables m begin
+		x[i = 1:3, j = 1:3; (i, j) in stored]
+		r[i = 1:3, j = 1:3; (i, j) in stored]
+	end
+	b = @block m begin
+		x[i = 1:3, j = 1:3], x[i, j] + r[i, j] == 1
+	end
+
+	named = copy(b)
+	@endo_exo_swap! named begin
+		r[i = 1:3, j = 2], x[i = 1:3, j = 2]
+	end
+	@test Set(endogenous(named)) == Set([r[1, 2], r[2, 2], x[1, 1], x[3, 1]])
+
+	reuse_left = copy(b)
+	@endo_exo_swap! reuse_left begin
+		r[i = 1:3, j = 2], x[(i, j) in keys(r[i = 1:3, j = 2])]
+	end
+	@test Set(endogenous(reuse_left)) == Set(endogenous(named))
+
+	reuse_right = copy(b)
+	@endo_exo_swap! reuse_right begin
+		r[(i, j) in keys(x); j == 2], x[:, 2]
+	end
+	@test Set(endogenous(reuse_right)) == Set(endogenous(named))
 end
 
 @testset "@endo_exo_swap! error messages" begin
@@ -1259,6 +1289,138 @@ end
 
 	@test length(b) == N * N
 	@test t < 5.0  # Should be well under 1 second, but allow margin for CI
+end
+
+@testset "@block filters named indices to sparse mapped variables" begin
+	stored = Set([(1, 1), (1, 2), (2, 2), (3, 1)])
+	expected = Set([(1, 2), (2, 2), (3, 1)])
+	m = Model()
+	SquareModels.@variables m begin
+		x[i = 1:3, j = 1:3; (i, j) in stored]
+	end
+
+	block_visits = Tuple{Int,Int}[]
+	test_visits = Tuple{Int,Int}[]
+	block_rhs = (i, j) -> begin
+		@test (i, j) in stored
+		push!(block_visits, (i, j))
+		i + j
+	end
+	test_rhs = (i, j) -> begin
+		@test (i, j) in stored
+		push!(test_visits, (i, j))
+		i + j
+	end
+
+	b = @block m begin
+		x[i = 1:3, j = 1:3; j == 2 || i == 3], x[i, j] == block_rhs(i, j)
+		@test_constraint("Sparse named indices")
+		x[i = 1:3, j = 1:3; j == 2 || i == 3], x[i, j] == test_rhs(i, j)
+	end
+
+	@test x isa SparseZeroArray
+	@test Set(block_visits) == expected
+	@test Set(test_visits) == expected
+	@test length(block_visits) == length(expected)
+	@test length(test_visits) == length(expected)
+	@test Set(endogenous(b)) == Set(x[i, j] for (i, j) in expected)
+	@test Set(c.variable for c in test_constraints(b)) == Set(x[i, j] for (i, j) in expected)
+
+	all_sparse = @block m begin
+		x[i = 1:3, j = 1:3], x[i, j] == i + j
+	end
+	@test Set(endogenous(all_sparse)) == Set(x[i, j] for (i, j) in stored)
+end
+
+@testset "@block sparse named-index edge cases" begin
+	m = Model()
+	i = 1:3
+	SquareModels.@variables m begin
+		x[k = i; k != 2]
+	end
+
+	shadowed_axis = @block m begin
+		x[i = i], x[i] == i
+	end
+	@test endogenous(shadowed_axis) == [x[1], x[3]]
+
+	m2 = Model()
+	SquareModels.@variables m2 begin
+		y[i = 1:2, j = 1:2; i != j]
+	end
+	one_named_axis = @block m2 begin
+		y[key = keys(y)], y[key...] == 1
+	end
+	@test Set(endogenous(one_named_axis)) == Set(y)
+
+	m3 = Model()
+	SquareModels.@variables m3 begin
+		z[i = 1:3, j = 1:3; (i, j) in Set([(1, 1), (1, 2), (2, 2), (3, 1)])]
+	end
+	scalar_axis = @block m3 begin
+		z[i = 1, j = 1:3], z[i, j] == 0
+		@test_constraint("Scalar named axis")
+		z[i = 1, j = 2], z[i, j] == 0
+	end
+	@test Set(endogenous(scalar_axis)) == Set([z[1, 1], z[1, 2]])
+	@test [c.variable for c in test_constraints(scalar_axis)] == [z[1, 2]]
+end
+
+@testset "@block keeps dense named-index behavior" begin
+	m = Model()
+	@variable(m, x[i = 1:3, j = [:a, :b]])
+
+	b = @block m begin
+		x[i = 1:3, j = [:a, :b]; i != 2 || j == :b], x[i, j] == i
+		@test_constraint("Dense named indices")
+		x[i = 1:3, j = [:a, :b]; i != 2 || j == :b], x[i, j] == i
+	end
+
+	expected = Set(x[i, j] for i in 1:3, j in [:a, :b] if i != 2 || j == :b)
+	@test x isa DenseAxisArray
+	@test Set(endogenous(b)) == expected
+	@test Set(c.variable for c in test_constraints(b)) == expected
+end
+
+@testset "@block filters plain SparseAxisArray named indices" begin
+	stored = Set([(1, 1), (1, 2), (2, 3), (3, 1)])
+	expected = Set([(1, 2), (2, 3)])
+	m = Model()
+	use_sparse_zero_array!(false)
+	try
+		SquareModels.@variables m begin
+			x[i = 1:3, j = 1:3; (i, j) in stored]
+		end
+
+		block_visits = Tuple{Int,Int}[]
+		test_visits = Tuple{Int,Int}[]
+		block_rhs = (i, j) -> begin
+			@test (i, j) in stored
+			push!(block_visits, (i, j))
+			i + j
+		end
+		test_rhs = (i, j) -> begin
+			@test (i, j) in stored
+			push!(test_visits, (i, j))
+			i + j
+		end
+
+		b = @block m begin
+			x[i = 1:3, j = 1:3; j >= 2], x[i, j] == block_rhs(i, j)
+			@test_constraint("SparseAxisArray named indices")
+			x[i = 1:3, j = 1:3; j >= 2], x[i, j] == test_rhs(i, j)
+		end
+
+		@test x isa SparseAxisArray
+		@test Set(block_visits) == expected
+		@test Set(test_visits) == expected
+		@test length(block_visits) == length(expected)
+		@test length(test_visits) == length(expected)
+		@test Set(endogenous(b)) == Set(x[i, j] for (i, j) in expected)
+		@test Set(c.variable for c in test_constraints(b)) == Set(x[i, j] for (i, j) in expected)
+	finally
+		use_sparse_zero_array!(true)
+	end
 end
 
 @testset "SparseAxisArray with tuple destructuring" begin
