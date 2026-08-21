@@ -63,6 +63,8 @@ Base.map(f, a::LabeledArray{T,N,A,D}) where {T,N,A<:_SparseTableArray,D} = f.(a.
 Base.mapreduce(f, op, a::LabeledArray) = mapreduce(f, op, a.data)
 Base.:(==)(a::LabeledArray, b) = a.data == b
 Base.:(==)(a, b::LabeledArray) = a == b.data
+Base.:(==)(a::LabeledArray, b::AbstractArray) = a.data == b
+Base.:(==)(a::AbstractArray, b::LabeledArray) = a == b.data
 Base.:(==)(a::LabeledArray, b::LabeledArray) = a.data == b.data
 Base.IteratorSize(::Type{LabeledArray{T,N,A,D}}) where {T,N,A<:_SparseTableArray,D} = Base.HasLength()
 

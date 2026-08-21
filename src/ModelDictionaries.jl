@@ -188,7 +188,13 @@ function Base.getindex(d::ModelDictionary, container::AbstractArray{<:AbstractSt
 	data_view = @view(d.dictionary.values[idx])
 	return create_window(data_view, container, varname)
 end
-Base.getindex(d::ModelDictionary, s::SparseZeroArray) = getindex(d, s.data)
+function Base.getindex(d::ModelDictionary, container::SparseZeroArray{<:AbstractVariableRef})
+	add_missing_model_variables!(d)
+	idx = indexin([name(variable) for variable in container], [keys(d.dictionary)...])
+	data_view = @view(d.dictionary.values[idx])
+	varname = isempty(container) ? nothing : split(name(first(container)), "[")[1]
+	return create_window(data_view, container, varname)
+end
 Base.setindex!(d::ModelDictionary, value, s::SparseZeroArray) = setindex!(d, value, s.data)
 
 function Base.getindex(d::ModelDictionary, container::AbstractArray{<:AbstractVariableRef})
@@ -259,6 +265,13 @@ function create_window(data_view, container, varname::Union{Nothing, AbstractStr
 	end
 	Window(data_view, indices, varname)
 end
+function create_window(data_view, container::SparseZeroArray, varname::Union{Nothing, AbstractString}=nothing)
+	indices = similar(container, Int)
+	for (i, key) in enumerate(keys(container))
+		indices[key] = i
+	end
+	return Window(data_view, indices, varname)
+end
 
 function Base.getproperty(w::Window, name::Symbol)
 	name == :shaped_view && return reshape(w.data_view, size(w.indices))
@@ -277,6 +290,8 @@ end
 	Base.iterate,
 	Base.collect,
 )
+Base.iterate(w::Window{<:Any,<:_SparseTableArray}, state...) = iterate(w.data_view, state...)
+Base.collect(w::Window{<:Any,<:_SparseTableArray}) = collect(w.data_view)
 
 _table_layout(w::Window) = _table_layout(w.shaped_view, axes(w.indices))
 function _table_layout(w::Window{<:Any,<:_SparseTableArray})
@@ -302,11 +317,20 @@ end
 Base.show(io::IO, w::Window) = show(io, MIME"text/plain"(), w)
 
 Base.getindex(w::Window, index::AbstractArray) = length(index) == 1 ? getindex(w, index[]) : getindex.(Ref(w), index)
-function Base.getindex(w::Window, indices...)
-	idx = w.indices[indices...]
-	idx isa Integer && return w.data_view[idx]
-	map(i -> w.data_view[i], Array(idx))
+_window_slice(w::Window, index::Integer) = w.data_view[index]
+_window_slice(::Window, zero::Zero) = zero
+_window_slice(w::Window, indices::AbstractArray) = map(i -> w.data_view[i], Array(indices))
+function _window_slice(w::Window, indices::SparseAxisArray)
+	values = similar(indices, eltype(w.data_view))
+	for key in keys(indices.data)
+		values[key] = w.data_view[indices[key]]
+	end
+	return values
 end
+_window_slice(w::Window, indices::SparseZeroArray) =
+	SparseZeroArray(_window_slice(w, indices.data), map(copy, indices.domain))
+
+Base.getindex(w::Window, indices...) = _window_slice(w, w.indices[indices...])
 
 Base.setindex!(w::Window, value, index::AbstractArray) = setindex!.(Ref(w), value, index)
 Base.setindex!(w::Window, value, indices...) = setindex!.(Ref(w.data_view), value, w.indices[indices...])
@@ -315,18 +339,25 @@ Base.setindex!(w::Window, value, indices...) = setindex!.(Ref(w.data_view), valu
 Base.vec(w::Window) = vec(collect(w))
 
 # Broadcasting support for Window - use shaped_view as the broadcastable representation
+Base.broadcastable(w::Window{<:Any,<:_SparseTableArray}) = _window_slice(w, w.indices)
 Base.broadcastable(w::Window) = w.shaped_view
 
 # For broadcast assignment (w .= x), materialize into the underlying data
-function Base.materialize!(w::Window, bc::Base.Broadcast.Broadcasted)
-	result = Base.materialize(bc)
-	if result isa AbstractArray
-		w.data_view .= vec(result)
-	else
-		w.data_view .= result  # scalar broadcast
+function _set_window!(w::Window{<:Any,<:_SparseTableArray}, values::_SparseTableArray)
+	target = _sparse_axis_array(w.indices)
+	source = _sparse_axis_array(values)
+	@assert length(target.data) == length(source.data) &&
+		all(key -> haskey(source.data, key), keys(target.data)) "Sparse Window assignment needs matching stored keys"
+	for key in keys(target.data)
+		w.data_view[target[key...]] = values[key...]
 	end
 	return w
 end
+_set_window!(w::Window, values::AbstractArray) = (w.data_view .= vec(values); w)
+_set_window!(w::Window, value) = (w.data_view .= value; w)
+
+Base.materialize!(w::Window, bc::Base.Broadcast.Broadcasted) =
+	_set_window!(w, Base.materialize(bc))
 
 Base.in(index::String, d::ModelDictionary) = index ∈ keys(d.dictionary)
 Base.in(index::Symbol, d::ModelDictionary) = String(index) ∈ d

@@ -46,13 +46,38 @@ end
 	stored = [(:a, :x, 1), (:a, :x, 2), (:b, :y, 1)]
 	SquareModels.@variables sparse_model begin
 		s[i = [:a, :b], j = [:x, :y], t = 1:2; (i, j, t) in stored]
+		s_copy[(i, j, t) = s]
 		empty_s[i = [:a]; i in Symbol[]]
 	end
-	b = ModelDictionary(sparse_model, collect(1.0:length(s)))
+	b = ModelDictionary(sparse_model)
+	b[s] .= collect(1.0:length(s))
+	b[s_copy] .= 0.0
 	w = b[s]
 
 	@test s isa SparseZeroArray
-	@test w.indices isa JuMP.Containers.SparseAxisArray
+	@test w.indices isa SparseZeroArray
+	@test w.indices.domain == s.domain
+	stored_values = [b[s[key...]] for key in keys(s)]
+	@test collect(w) == stored_values
+	@test [value for value in w] == stored_values
+	full = w[:, :, :]
+	@test full isa SparseZeroArray
+	@test full.domain == s.domain
+	@test collect(keys(full)) == collect(keys(s))
+	@test full[:a, :x, 2] == b[s[:a, :x, 2]]
+	@test full[:b, :x, 2] isa SquareModels.Zero
+	b[s_copy] .= full
+	@test all(b[s_copy[key...]] == b[s[key...]] for key in keys(s))
+	b[s_copy] .= w
+	@test all(b[s_copy[key...]] == b[s[key...]] for key in keys(s))
+	reversed = SparseZeroArray(
+		JuMP.Containers.SparseAxisArray(JuMP.Containers.OrderedCollections.OrderedDict(
+			key => b[s[key...]] for key in reverse(collect(keys(s)))
+		)),
+		map(copy, s.domain),
+	)
+	b[s_copy] .= reversed
+	@test all(b[s_copy[key...]] == b[s[key...]] for key in keys(s))
 	output = sprint(show, MIME"text/plain"(), w)
 	@test startswith(output, "3-element Window:\n")
 	@test sprint(show, MIME"text/plain"(), b[:s]) == output
@@ -80,7 +105,8 @@ end
 	@test (@prt(:p, b, s))[:a, :x, 2] == 100.0
 	@test (@prt(:q, b => b, s))[:a, :x, 2] == 0.0
 	@test split(output, '\n'; limit=2)[2] == sprint(show, MIME"text/plain"(), printed)
-	@test b[empty_s].indices isa JuMP.Containers.SparseAxisArray
+	@test b[empty_s].indices isa SparseZeroArray
+	@test b[empty_s].indices.domain == empty_s.domain
 	@test sprint(show, MIME"text/plain"(), b[empty_s]) == "0-element Window"
 	@test sprint(show, MIME"text/plain"(), @prt(b, empty_s)) == "0-element table"
 	@test SquareModels._wrap_label("αβγδε", 2) == ["αβ", "γδ", "ε"]
@@ -127,6 +153,11 @@ end
 		plain = b[p]
 		@test p isa JuMP.Containers.SparseAxisArray
 		@test plain.indices isa JuMP.Containers.SparseAxisArray
+		@test collect(plain) == [b[p[key...]] for key in keys(p.data)]
+		plain_full = plain[:, :, :]
+		@test plain_full isa JuMP.Containers.SparseAxisArray
+		@test collect(keys(plain_full.data)) == collect(keys(p.data))
+		@test all(plain_full[key...] == b[p[key...]] for key in keys(p.data))
 		plain_output = sprint(show, MIME"text/plain"(), plain)
 		@test startswith(plain_output, "3-element Window:\n")
 		@test SquareModels._table_layout(plain).data[2, 2] == ""
