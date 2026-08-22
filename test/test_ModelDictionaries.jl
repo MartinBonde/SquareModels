@@ -1290,6 +1290,22 @@ end
 	other = ModelDictionary(other_model)
 	@test !keys_match(a, other)
 	@test_throws ErrorException assert_no_diff(a, other)
+
+	a[x] = 1.0
+	b[x] = 2.0
+	a[y] = b[y]
+	difference_error = try
+		assert_no_diff(a, b; atol=0.1)
+	catch error
+		error
+	end
+	@test difference_error isa ToleranceError
+	difference_output = sprint(showerror, difference_error)
+	@test occursin("variable", difference_output)
+	@test occursin("abs diff", difference_output)
+	@test occursin("rel diff", difference_output)
+	@test occursin("reference", difference_output)
+	@test occursin('┌', difference_output)
 end
 
 @testset "value_dict" begin
@@ -1320,7 +1336,19 @@ end
 	tolerances[x] = 2.0
 	tolerances[y] = [0.2, 1.5]
 
-	@test_throws ResidualError assert_residuals_small(data; atol=0.1)
+	residual_error = try
+		assert_residuals_small(data; atol=0.1)
+	catch error
+		error
+	end
+	@test residual_error isa ResidualError
+	residual_output = sprint(showerror, residual_error)
+	@test occursin("residual", residual_output)
+	@test occursin("|value|", residual_output)
+	@test occursin("tolerance", residual_output)
+	@test occursin("x_J", residual_output)
+	@test occursin("y_J[2]", residual_output)
+	@test occursin('┌', residual_output)
 	@test assert_residuals_small(data; atol=0.1, tolerances)
 
 	data[y_J[2]] = 1.6

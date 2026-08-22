@@ -46,10 +46,11 @@ ResidualError(violations, atol::Real, msg::String) = ResidualError(violations, F
 function Base.showerror(io::IO, e::ResidualError)
 	isempty(e.msg) || print(io, e.msg, "\n")
 	tol_desc = e.rtol > 0 ? "atol=$(e.atol), rtol=$(e.rtol)" : "atol=$(e.atol)"
-	print(io, "$(length(e.violations)) residuals exceed tolerance ($tol_desc):")
-	for (k, v, tol) in e.violations
-		print(io, "\n  $(k): |value|=$(v), tolerance=$(tol)")
-	end
+	println(io, "$(length(e.violations)) residuals exceed tolerance ($tol_desc):")
+	_print_table(io, hcat(getindex.(e.violations, 2), getindex.(e.violations, 3));
+		column_labels=["|value|", "tolerance"],
+		row_labels=getindex.(e.violations, 1),
+		stubhead_label="residual")
 end
 
 """
@@ -70,12 +71,19 @@ end
 function Base.showerror(io::IO, e::ToleranceError)
 	isempty(e.msg) || print(io, e.msg, "\n")
 	tol_desc = e.rtol > 0 ? "atol=$(e.atol), rtol=$(e.rtol)" : "atol=$(e.atol)"
-	print(io, "$(length(e.violations)) differences exceed tolerance ($tol_desc):")
-	for (k, d, rd, v1, v2) in e.violations
-		line = isinf(rd) ? "  $(k): diff=$(d) ($(v1) vs $(v2))" :
-		       "  $(k): diff=$(d) ($(round(rd * 100, digits=2))%) ($(v1) vs $(v2))"
-		print(io, "\n", line)
-	end
+	println(io, "$(length(e.violations)) differences exceed tolerance ($tol_desc):")
+	relative_differences = [
+		isinf(v[3]) ? "" : "$(round(v[3] * 100, digits=2))%" for v in e.violations
+	]
+	_print_table(io, hcat(
+		getindex.(e.violations, 2),
+		relative_differences,
+		getindex.(e.violations, 4),
+		getindex.(e.violations, 5),
+	);
+		column_labels=["abs diff", "rel diff", "value", "reference"],
+		row_labels=getindex.(e.violations, 1),
+		stubhead_label="variable")
 end
 
 """
@@ -100,22 +108,37 @@ end
 function Base.showerror(io::IO, e::TestConstraintError)
 	isempty(e.msg) || print(io, e.msg, "\n")
 	tol_desc = e.rtol > 0 ? "atol=$(e.atol), rtol=$(e.rtol)" : "atol=$(e.atol)"
-	print(io, "$(length(e.violations)) test constraints exceed tolerance (defaults: $tol_desc):")
-	for (name, distance, tolerance, message) in e.violations
-		print(io, "\n  $(name): distance=$(distance), tolerance=$(tolerance)")
-		isempty(message) || print(io, ": ", message)
-	end
+	println(io, "$(length(e.violations)) test constraints exceed tolerance (defaults: $tol_desc):")
+	_print_table(io, hcat(
+		getindex.(e.violations, 2),
+		getindex.(e.violations, 3),
+		getindex.(e.violations, 4),
+	);
+		column_labels=["distance", "tolerance", "message"],
+		row_labels=getindex.(e.violations, 1),
+		stubhead_label="variable")
 end
 
 """
 	NonSquareError <: SquareModelError
 
-Thrown when a block is not effectively square after substituting exogenous data
-(trivial equations and/or orphan variables). `msg` holds the formatted
-diagnostic describing the offending equations and variables.
+Thrown when a block is not square or is not effectively square after data
+substitution. `msg` holds the error summary. `mappings` can hold the duplicate
+endogenous-variable and equation pairs that caused the error.
 """
-struct NonSquareError <: SquareModelError
+struct NonSquareError{M} <: SquareModelError
 	msg::String
+	mappings::M
 end
+NonSquareError(msg::String) = NonSquareError(msg, nothing)
 
-Base.showerror(io::IO, e::NonSquareError) = print(io, e.msg)
+Base.showerror(io::IO, e::NonSquareError{Nothing}) = print(io, e.msg)
+
+function Base.showerror(io::IO, e::NonSquareError)
+	println(io, e.msg)
+	_print_table(io, hcat(
+		string.(first.(e.mappings)),
+		string.(getproperty.(last.(e.mappings), :func)),
+	);
+		column_labels=["endogenous variable", "equation expression (= 0)"])
+end
