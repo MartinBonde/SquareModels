@@ -123,22 +123,51 @@ end
 	NonSquareError <: SquareModelError
 
 Thrown when a block is not square or is not effectively square after data
-substitution. `msg` holds the error summary. `mappings` can hold the duplicate
-endogenous-variable and equation pairs that caused the error.
+substitution. `msg` is a one-line summary. Extra rows go in `mappings`,
+`trivial`, and `orphans` so [`showerror`](@ref Base.showerror) can print them
+as tables. Do not put those lists in `msg`: Julia `show` escapes newlines, and
+hosts that call `show` instead of `showerror` then dump one long line.
 """
 struct NonSquareError{M} <: SquareModelError
 	msg::String
 	mappings::M
+	trivial::Vector{Tuple{String, Float64}}
+	orphans::Vector{String}
 end
-NonSquareError(msg::String) = NonSquareError(msg, nothing)
-
-Base.showerror(io::IO, e::NonSquareError{Nothing}) = print(io, e.msg)
+NonSquareError(msg::String, mappings=nothing; trivial=Tuple{String, Float64}[], orphans=String[]) =
+	NonSquareError(msg, mappings, convert(Vector{Tuple{String, Float64}}, trivial), convert(Vector{String}, orphans))
 
 function Base.showerror(io::IO, e::NonSquareError)
-	println(io, e.msg)
-	_print_table(io, hcat(
-		string.(first.(e.mappings)),
-		string.(getproperty.(last.(e.mappings), :func)),
-	);
-		column_labels=["endogenous variable", "equation expression (= 0)"])
+	print(io, e.msg)
+	if e.mappings !== nothing && !isempty(e.mappings)
+		println(io)
+		_print_table(io, hcat(
+			string.(first.(e.mappings)),
+			string.(getproperty.(last.(e.mappings), :func)),
+		);
+			column_labels=["endogenous variable", "equation expression (= 0)"])
+	end
+	if !isempty(e.trivial)
+		println(io)
+		println(io, "$(length(e.trivial)) trivial equation(s) (no endogenous variables effectively present after substituting exogenous data):")
+		_print_table(io, hcat(last.(e.trivial), _trivial_status.(last.(e.trivial)));
+			column_labels=["constant", "status"],
+			row_labels=first.(e.trivial),
+			stubhead_label="variable")
+	end
+	if !isempty(e.orphans)
+		println(io)
+		println(io, "$(length(e.orphans)) orphan variable(s) (not effectively present in any non-trivial equation):")
+		_print_table(io, reshape(e.orphans, :, 1); column_labels=["variable"])
+	end
 end
+
+_trivial_status(rhs::Float64) =
+	isnan(rhs) ? "constant could not be determined" :
+	abs(rhs) < 1e-12 ? "redundant" : "infeasible"
+
+# `show` must stay short and on one line. Julia escapes newlines here, and a
+# host that prints an exception with `show` then dumps one unreadable line.
+# The tables belong to `showerror`.
+Base.show(io::IO, e::SquareModelError) =
+	print(io, nameof(typeof(e)), "(", repr(first(split(e.msg, '\n'; limit=2))), ")")

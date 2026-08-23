@@ -489,7 +489,22 @@ end
     data[residuals(b1)] .= 0.0
     block = b1
 
-    @test_throws NonSquareError solve(block, data)
+    err = try
+        solve(block, data)
+        nothing
+    catch e
+        e
+    end
+    @test err isa NonSquareError
+    compact = sprint(show, err)
+    @test count('\n', compact) == 0
+    @test length(compact) < 200
+    @test occursin("not effectively square", compact)
+    @test !occursin("\\n", compact)
+    full = sprint(showerror, err)
+    @test occursin('\n', full)
+    @test occursin('┌', full)
+    @test occursin("z", full)
 
     # Disabling pre-solve diagnostics allows it through (solver may still fail)
     solve_model, var_map = _build_model(block, data; presolve_diagnostics=false)

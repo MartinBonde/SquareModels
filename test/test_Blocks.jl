@@ -237,6 +237,10 @@ end
 	@test occursin("equation", output)
 	@test occursin("x", output)
 	@test occursin('┌', output)
+	compact = sprint(show, error)
+	@test count('\n', compact) == 0
+	@test occursin("NonSquareError", compact)
+	@test occursin("Non-unique mapping", compact)
 end
 
 @testset "solve block" begin
