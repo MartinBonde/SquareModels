@@ -756,6 +756,10 @@ function _read_simple_keyed(path::AbstractString; variable=nothing)
 	if variable !== nothing
 		df = df[_tab_str.(df.variable) .== string(variable), :]
 	end
+	empty_message = variable === nothing ?
+		"No data rows found in $path" :
+		"No data rows found for variable \"$variable\" in $path"
+	isempty(df) && error(empty_message)
 	return Dict(_parse_index_tuple(_tab_str(row.indices)) => Float64(row.value) for row in eachrow(df))
 end
 

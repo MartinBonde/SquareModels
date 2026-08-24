@@ -829,7 +829,16 @@ end
 			@test read_variable(data_path, y; default=0.0)[2, 1] == 20.0
 			@test read_sparse_array(data_path; variable="x")[:b, 2024] == 2.0
 			@test read_sparse_array(data_path, "y")[:b, 2024] == 20.0
+			@test_throws ErrorException(
+				"No data rows found for variable \"z\" in $data_path",
+			) read_sparse_array(data_path; variable="z")
 		end
+
+		empty_path = joinpath(tmpdir, "empty.csv")
+		CSV.write(empty_path, DataFrame(variable=String[], indices=String[], value=Float64[]))
+		@test_throws ErrorException(
+			"No data rows found in $empty_path",
+		) read_sparse_array(empty_path)
 	end
 end
 
