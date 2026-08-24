@@ -180,9 +180,10 @@ struct Block
 
 		endogenous_set = Set{VariableRef}(endogenous)
 		if length(endogenous_set) != length(endogenous)
-			display(non_unqiue_pairs(endogenous, equations))
-			error("Non-unique mapping between endogenous variables and equations in block definition.\n" *
-			      "See non-unique mappings above.")
+			throw(NonSquareError(
+				"Non-unique mapping between endogenous variables and equations in block definition:",
+				non_unqiue_pairs(endogenous, equations),
+			))
 		end
 
 		new(model, endogenous, residuals, variables, endogenous_set, equations, test_constraints)

@@ -363,28 +363,10 @@ function diagnose(block::Block, data::ModelDictionary)
     return trivial, orphans
 end
 
-function _format_diagnostic_error(trivial::Vector{TrivialEquation}, orphans::Vector{OrphanVariable})
-    lines = String[]
-    if !isempty(trivial)
-        push!(lines, "$(length(trivial)) trivial equation(s) (no endogenous variables effectively present after substituting exogenous data):")
-        for t in trivial
-            rhs = t.constant_value
-            if isnan(rhs)
-                push!(lines, "  Eq $(t.index): $(name(t.endogenous)) — effectively trivial (constant value could not be determined)")
-            else
-                status = abs(rhs) < 1e-12 ? "0 = 0 (redundant)" : "$(rhs) = 0 (infeasible!)"
-                push!(lines, "  Eq $(t.index): $(name(t.endogenous)) — $status")
-            end
-        end
-    end
-    if !isempty(orphans)
-        push!(lines, "$(length(orphans)) orphan variable(s) (not effectively present in any non-trivial equation):")
-        for o in orphans
-            push!(lines, "  $(name(o.endogenous))")
-        end
-    end
-    join(lines, "\n")
-end
+_trivial_rows(trivial::Vector{TrivialEquation}) =
+	Tuple{String, Float64}[(name(t.endogenous), t.constant_value) for t in trivial]
+_orphan_names(orphans::Vector{OrphanVariable}) =
+	String[name(o.endogenous) for o in orphans]
 
 # ============================================================================
 # _build_model (internal)
@@ -476,8 +458,11 @@ function _build_model(
     if presolve_diagnostics
         orphans = OrphanVariable[OrphanVariable(v) for v in block.endogenous if v ∉ endos_used]
         if !isempty(trivial) || !isempty(orphans)
-            throw(NonSquareError("Model is not effectively square after substituting exogenous values.\n" *
-                  _format_diagnostic_error(trivial, orphans)))
+            throw(NonSquareError(
+                "Model is not effectively square after substituting exogenous values.",
+                trivial=_trivial_rows(trivial),
+                orphans=_orphan_names(orphans),
+            ))
         end
     end
 
