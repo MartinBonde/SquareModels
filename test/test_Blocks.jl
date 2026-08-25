@@ -218,6 +218,31 @@ end
 	end
 end
 
+@testset "Duplicate block mapping display" begin
+	m = Model()
+	@variable(m, x)
+
+	error = try
+		@block m begin
+			x, x == 1
+			x, x == 2
+		end
+	catch error
+		error
+	end
+	@test error isa NonSquareError
+	output = sprint(showerror, error)
+	@test occursin("Non-unique mapping", output)
+	@test occursin("endogenous variable", output)
+	@test occursin("equation", output)
+	@test occursin("x", output)
+	@test occursin('┌', output)
+	compact = sprint(show, error)
+	@test count('\n', compact) == 0
+	@test occursin("NonSquareError", compact)
+	@test occursin("Non-unique mapping", compact)
+end
+
 @testset "solve block" begin
 	m = Model(Ipopt.Optimizer)
 	set_silent(m)
@@ -1116,8 +1141,12 @@ end
 	@test err isa TestConstraintError
 	@test err.data === solution
 	@test only(err.violations)[1] == "a[1]"
-	@test occursin("Block test constraints failed", sprint(showerror, err))
-	@test occursin("a aggregation", sprint(showerror, err))
+	test_constraint_output = sprint(showerror, err)
+	@test occursin("Block test constraints failed", test_constraint_output)
+	@test occursin("distance", test_constraint_output)
+	@test occursin("tolerance", test_constraint_output)
+	@test occursin("a aggregation", test_constraint_output)
+	@test occursin('┌', test_constraint_output)
 	solution[a_i[1, 1]] -= 1.0
 
 	m_bad = Model(Ipopt.Optimizer)

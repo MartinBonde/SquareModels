@@ -46,10 +46,11 @@ ResidualError(violations, atol::Real, msg::String) = ResidualError(violations, F
 function Base.showerror(io::IO, e::ResidualError)
 	isempty(e.msg) || print(io, e.msg, "\n")
 	tol_desc = e.rtol > 0 ? "atol=$(e.atol), rtol=$(e.rtol)" : "atol=$(e.atol)"
-	print(io, "$(length(e.violations)) residuals exceed tolerance ($tol_desc):")
-	for (k, v, tol) in e.violations
-		print(io, "\n  $(k): |value|=$(v), tolerance=$(tol)")
-	end
+	println(io, "$(length(e.violations)) residuals exceed tolerance ($tol_desc):")
+	_print_table(io, hcat(getindex.(e.violations, 2), getindex.(e.violations, 3));
+		column_labels=["|value|", "tolerance"],
+		row_labels=getindex.(e.violations, 1),
+		stubhead_label="residual")
 end
 
 """
@@ -70,12 +71,19 @@ end
 function Base.showerror(io::IO, e::ToleranceError)
 	isempty(e.msg) || print(io, e.msg, "\n")
 	tol_desc = e.rtol > 0 ? "atol=$(e.atol), rtol=$(e.rtol)" : "atol=$(e.atol)"
-	print(io, "$(length(e.violations)) differences exceed tolerance ($tol_desc):")
-	for (k, d, rd, v1, v2) in e.violations
-		line = isinf(rd) ? "  $(k): diff=$(d) ($(v1) vs $(v2))" :
-		       "  $(k): diff=$(d) ($(round(rd * 100, digits=2))%) ($(v1) vs $(v2))"
-		print(io, "\n", line)
-	end
+	println(io, "$(length(e.violations)) differences exceed tolerance ($tol_desc):")
+	relative_differences = [
+		isinf(v[3]) ? "" : "$(round(v[3] * 100, digits=2))%" for v in e.violations
+	]
+	_print_table(io, hcat(
+		getindex.(e.violations, 2),
+		relative_differences,
+		getindex.(e.violations, 4),
+		getindex.(e.violations, 5),
+	);
+		column_labels=["abs diff", "rel diff", "value", "reference"],
+		row_labels=getindex.(e.violations, 1),
+		stubhead_label="variable")
 end
 
 """
@@ -101,22 +109,66 @@ end
 function Base.showerror(io::IO, e::TestConstraintError)
 	isempty(e.msg) || print(io, e.msg, "\n")
 	tol_desc = e.rtol > 0 ? "atol=$(e.atol), rtol=$(e.rtol)" : "atol=$(e.atol)"
-	print(io, "$(length(e.violations)) test constraints exceed tolerance (configured defaults: $tol_desc; inequalities use zero when not configured):")
-	for (name, distance, tolerance, message) in e.violations
-		print(io, "\n  $(name): distance=$(distance), tolerance=$(tolerance)")
-		isempty(message) || print(io, ": ", message)
-	end
+	println(io, "$(length(e.violations)) test constraints exceed tolerance (configured defaults: $tol_desc; inequalities use zero when not configured):")
+	_print_table(io, hcat(
+		getindex.(e.violations, 2),
+		getindex.(e.violations, 3),
+		getindex.(e.violations, 4),
+	);
+		column_labels=["distance", "tolerance", "message"],
+		row_labels=getindex.(e.violations, 1),
+		stubhead_label="variable")
 end
 
 """
 	NonSquareError <: SquareModelError
 
-Thrown when a block is not effectively square after substituting exogenous data
-(trivial equations and/or orphan variables). `msg` holds the formatted
-diagnostic describing the offending equations and variables.
+Thrown when a block is not square or is not effectively square after data
+substitution. `msg` is a one-line summary. Extra rows go in `mappings`,
+`trivial`, and `orphans` so [`showerror`](@ref Base.showerror) can print them
+as tables. Do not put those lists in `msg`: Julia `show` escapes newlines, and
+hosts that call `show` instead of `showerror` then dump one long line.
 """
-struct NonSquareError <: SquareModelError
+struct NonSquareError{M} <: SquareModelError
 	msg::String
+	mappings::M
+	trivial::Vector{Tuple{String, Float64}}
+	orphans::Vector{String}
+end
+NonSquareError(msg::String, mappings=nothing; trivial=Tuple{String, Float64}[], orphans=String[]) =
+	NonSquareError(msg, mappings, convert(Vector{Tuple{String, Float64}}, trivial), convert(Vector{String}, orphans))
+
+function Base.showerror(io::IO, e::NonSquareError)
+	print(io, e.msg)
+	if e.mappings !== nothing && !isempty(e.mappings)
+		println(io)
+		_print_table(io, hcat(
+			string.(first.(e.mappings)),
+			string.(getproperty.(last.(e.mappings), :func)),
+		);
+			column_labels=["endogenous variable", "equation expression (= 0)"])
+	end
+	if !isempty(e.trivial)
+		println(io)
+		println(io, "$(length(e.trivial)) trivial equation(s) (no endogenous variables effectively present after substituting exogenous data):")
+		_print_table(io, hcat(last.(e.trivial), _trivial_status.(last.(e.trivial)));
+			column_labels=["constant", "status"],
+			row_labels=first.(e.trivial),
+			stubhead_label="variable")
+	end
+	if !isempty(e.orphans)
+		println(io)
+		println(io, "$(length(e.orphans)) orphan variable(s) (not effectively present in any non-trivial equation):")
+		_print_table(io, reshape(e.orphans, :, 1); column_labels=["variable"])
+	end
 end
 
-Base.showerror(io::IO, e::NonSquareError) = print(io, e.msg)
+_trivial_status(rhs::Float64) =
+	isnan(rhs) ? "constant could not be determined" :
+	abs(rhs) < 1e-12 ? "redundant" : "infeasible"
+
+# `show` must stay short and on one line. Julia escapes newlines here, and a
+# host that prints an exception with `show` then dumps one unreadable line.
+# The tables belong to `showerror`.
+Base.show(io::IO, e::SquareModelError) =
+	print(io, nameof(typeof(e)), "(", repr(first(split(e.msg, '\n'; limit=2))), ")")
