@@ -962,7 +962,8 @@ constraint can use `==`, `<=`, or `>=`; Unicode `≤` and `≥` also work. The
 optional string appears in [`TestConstraintError`](@ref) output. The optional
 `atol` and `rtol` keywords override the matching tolerance passed to
 [`solve`](@ref), [`solve!`](@ref), or [`assert_test_constraints`](@ref) for this
-test constraint.
+test constraint. Without an explicit tolerance, equalities use `atol=1e-6` and
+`rtol=1e-8`; inequalities use zero for both.
 
 `@test_constraint` is valid only in an `@block` body. `solve` and `solve!` run
 all test constraints after a successful solve. Use

@@ -227,6 +227,9 @@ end
 # Diagnostics
 # ============================================================================
 
+const _TEST_CONSTRAINT_EQUALITY_ATOL = 1e-6
+const _TEST_CONSTRAINT_EQUALITY_RTOL = 1e-8
+
 function _test_constraint_value(test_constraint::TestConstraint, data::ModelDictionary)
     return Float64(JuMP.value(test_constraint.equation.func) do var
         data_value = data[var]
@@ -236,7 +239,7 @@ function _test_constraint_value(test_constraint::TestConstraint, data::ModelDict
 end
 
 """
-    assert_test_constraints(block::Block, data::ModelDictionary; atol=1e-6, rtol=1e-8, msg="")
+    assert_test_constraints(block::Block, data::ModelDictionary; atol=nothing, rtol=nothing, msg="")
 
 Test all [`@test_constraint`](@ref) entries in `block` against `data`.
 
@@ -245,10 +248,12 @@ uses MathOptInterface to get its distance from the constraint set. It does not
 add test constraints to the solve model and does not run a second solve.
 
 A test constraint passes when its distance is at most
-`max(atol, rtol * abs(data[test_constraint.variable]))`. An `atol` or `rtol`
-keyword on `@test_constraint` replaces the matching function argument for that
-test. Its optional message appears in the error output if it fails. This function
-returns `true` if all test constraints pass and throws
+`max(atol, rtol * abs(data[test_constraint.variable]))`. By default, `atol` and
+`rtol` are `1e-6` and `1e-8` for equalities and both are zero for inequalities.
+Passing an `atol` or `rtol` function argument sets that default for all constraint
+types. A matching keyword on `@test_constraint` overrides the function argument
+for that test. Its optional message appears in the error output if it fails. This
+function returns `true` if all test constraints pass and throws
 [`TestConstraintError`](@ref) if one or more fail.
 
 # Example
@@ -266,16 +271,20 @@ assert_test_constraints(block, solution; atol=1e-8)
 function assert_test_constraints(
     block::Block,
     data::ModelDictionary;
-    atol::Real=1e-6,
-    rtol::Real=1e-8,
+    atol::Union{Nothing, Real}=nothing,
+    rtol::Union{Nothing, Real}=nothing,
     msg::String="",
 )
     violations = Tuple{String, Float64, Float64, String}[]
     for test_constraint in block.test_constraints
         value = _test_constraint_value(test_constraint, data)
-        distance = Float64(MOI.Utilities.distance_to_set(value, test_constraint.equation.set))
-        constraint_atol = something(test_constraint.atol, atol)
-        constraint_rtol = something(test_constraint.rtol, rtol)
+        set = test_constraint.equation.set
+        distance = Float64(MOI.Utilities.distance_to_set(value, set))
+        is_equality = set isa MOI.EqualTo
+        default_atol = something(atol, is_equality ? _TEST_CONSTRAINT_EQUALITY_ATOL : 0.0)
+        default_rtol = something(rtol, is_equality ? _TEST_CONSTRAINT_EQUALITY_RTOL : 0.0)
+        constraint_atol = something(test_constraint.atol, default_atol)
+        constraint_rtol = something(test_constraint.rtol, default_rtol)
         tolerance = Float64(constraint_atol)
         if constraint_rtol > 0
             scale = data[test_constraint.variable]
@@ -287,7 +296,9 @@ function assert_test_constraints(
     end
     if !isempty(violations)
         sort!(violations, by=x -> isnan(x[2]) ? Inf : x[2], rev=true)
-        throw(TestConstraintError(violations, Float64(atol), Float64(rtol), msg, data))
+        error_atol = Float64(something(atol, _TEST_CONSTRAINT_EQUALITY_ATOL))
+        error_rtol = Float64(something(rtol, _TEST_CONSTRAINT_EQUALITY_RTOL))
+        throw(TestConstraintError(violations, error_atol, error_rtol, msg, data))
     end
     return true
 end
@@ -606,7 +617,7 @@ end
 """
     solve(block::Block, data::ModelDictionary; start_values=nothing, replace_nothing=nothing,
           presolve_diagnostics=true, run_test_constraints=true,
-          test_constraint_atol=1e-6, test_constraint_rtol=1e-8)
+          test_constraint_atol=nothing, test_constraint_rtol=nothing)
 
 Build, optimize, and extract solution in one step.
 
@@ -618,10 +629,11 @@ Before solving, runs diagnostics to detect trivial equations and orphan variable
 
 After solving, runs all `@test_constraint` entries in the block. Set
 `run_test_constraints=false` to skip them. Use `test_constraint_atol` and
-`test_constraint_rtol` to set their default tolerances. An `atol` or `rtol`
-keyword on a test constraint overrides the matching default. If a test
-constraint fails, the thrown [`TestConstraintError`](@ref) stores the solved copy
-in its `data` field.
+`test_constraint_rtol` to set their default tolerances. Without these keywords,
+equalities use `atol=1e-6` and `rtol=1e-8`, while inequalities use zero for both.
+An `atol` or `rtol` keyword on a test constraint overrides the matching default.
+If a test constraint fails, the thrown [`TestConstraintError`](@ref) stores the
+solved copy in its `data` field.
 
 Optimizer attributes (silent mode, time limit) are copied from the block's model to the
 intermediate solve model. Use `set_silent(model)` or `set_time_limit_sec(model, seconds)`
@@ -635,8 +647,8 @@ on the original model to configure solver behavior.
   values with this number. If not provided, `nothing` values will cause errors.
 - `presolve_diagnostics::Bool`: Run structural diagnostics before the solve (default `true`)
 - `run_test_constraints::Bool`: Run test constraints after the solve (default `true`)
-- `test_constraint_atol::Real`: Default absolute tolerance for test constraints (default `1e-6`)
-- `test_constraint_rtol::Real`: Default relative tolerance for test constraints (default `1e-8`)
+- `test_constraint_atol::Union{Nothing, Real}`: Default absolute tolerance for all test constraints (`nothing` uses `1e-6` for equalities and zero for inequalities)
+- `test_constraint_rtol::Union{Nothing, Real}`: Default relative tolerance for all test constraints (`nothing` uses `1e-8` for equalities and zero for inequalities)
 
 # Returns
 A new `ModelDictionary` containing the solution values for endogenous variables,
@@ -672,8 +684,8 @@ function solve(
     replace_nothing::Union{Nothing, Number} = nothing,
     presolve_diagnostics::Bool = true,
     run_test_constraints::Bool = true,
-    test_constraint_atol::Real = 1e-6,
-    test_constraint_rtol::Real = 1e-8,
+    test_constraint_atol::Union{Nothing, Real} = nothing,
+    test_constraint_rtol::Union{Nothing, Real} = nothing,
 )
     result = copy(data)
     solve!(block, result;
@@ -690,7 +702,7 @@ end
 """
     solve!(block::Block, data::ModelDictionary; start_values=nothing, replace_nothing=nothing,
            presolve_diagnostics=true, run_test_constraints=true,
-           test_constraint_atol=1e-6, test_constraint_rtol=1e-8)
+           test_constraint_atol=nothing, test_constraint_rtol=nothing)
 
 Build, optimize, and update data in-place.
 
@@ -702,8 +714,9 @@ Before solving, runs diagnostics to detect trivial equations and orphan variable
 After writing the solved values to `data`, runs all `@test_constraint` entries in
 the block. If one fails, `data` keeps the solved values for inspection. Set
 `run_test_constraints=false` to skip them. Use `test_constraint_atol` and
-`test_constraint_rtol` to set their default tolerances. An `atol` or `rtol`
-keyword on a test constraint overrides the matching default.
+`test_constraint_rtol` to set their default tolerances. Without these keywords,
+equalities use `atol=1e-6` and `rtol=1e-8`, while inequalities use zero for both.
+An `atol` or `rtol` keyword on a test constraint overrides the matching default.
 
 Optimizer attributes (silent mode, time limit) are copied from the block's model to the
 intermediate solve model. Use `set_silent(model)` or `set_time_limit_sec(model, seconds)`
@@ -717,8 +730,8 @@ on the original model to configure solver behavior.
   values with this number. If not provided, `nothing` values will cause errors.
 - `presolve_diagnostics::Bool`: Run structural diagnostics before the solve (default `true`)
 - `run_test_constraints::Bool`: Run test constraints after the solve (default `true`)
-- `test_constraint_atol::Real`: Default absolute tolerance for test constraints (default `1e-6`)
-- `test_constraint_rtol::Real`: Default relative tolerance for test constraints (default `1e-8`)
+- `test_constraint_atol::Union{Nothing, Real}`: Default absolute tolerance for all test constraints (`nothing` uses `1e-6` for equalities and zero for inequalities)
+- `test_constraint_rtol::Union{Nothing, Real}`: Default relative tolerance for all test constraints (`nothing` uses `1e-8` for equalities and zero for inequalities)
 
 # Returns
 The mutated `data` ModelDictionary.
@@ -735,8 +748,8 @@ function solve!(
     replace_nothing::Union{Nothing, Number} = nothing,
     presolve_diagnostics::Bool = true,
     run_test_constraints::Bool = true,
-    test_constraint_atol::Real = 1e-6,
-    test_constraint_rtol::Real = 1e-8,
+    test_constraint_atol::Union{Nothing, Real} = nothing,
+    test_constraint_rtol::Union{Nothing, Real} = nothing,
 )
     model, var_map = _build_model(block, data; start_values, replace_nothing, presolve_diagnostics)
     try

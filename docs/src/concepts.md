@@ -92,7 +92,8 @@ The test passes when the gap is at most
 `max(atol, rtol * abs(data[a[t]]))`. The mapped variable, `a[t]` in this
 example, sets the scale for the relative tolerance. If you omit a keyword, the
 test uses the value from `test_constraint_atol` or `test_constraint_rtol` in
-`solve` or `solve!`. These defaults are `1e-6` and `1e-8`.
+`solve` or `solve!`. Without those solve keywords, equalities use `1e-6` and
+`1e-8`, while inequalities use zero for both tolerances.
 
 Set `run_test_constraints=false` to skip all tests. Use
 [`assert_test_constraints`](@ref) to test a loaded or edited `ModelDictionary`

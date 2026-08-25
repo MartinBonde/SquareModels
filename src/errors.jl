@@ -85,9 +85,10 @@ Thrown by [`assert_test_constraints`](@ref) when one or more test constraints
 exceed their tolerance. Each `violations` entry is
 `(name, distance, tolerance, message)`.
 `distance` is the distance from the evaluated JuMP expression to its constraint
-set. `atol` and `rtol` are the defaults passed to the test. A test constraint can
-override them. `data` is the tested dictionary, including the solved copy when
-[`solve`](@ref) throws this error.
+set. `atol` and `rtol` are the explicit defaults passed to the test, or the
+equality defaults when they were omitted. Inequalities use zero by default. A
+test constraint can override either tolerance. `data` is the tested dictionary,
+including the solved copy when [`solve`](@ref) throws this error.
 """
 struct TestConstraintError{D} <: SquareModelError
 	violations::Vector{Tuple{String, Float64, Float64, String}}
@@ -100,7 +101,7 @@ end
 function Base.showerror(io::IO, e::TestConstraintError)
 	isempty(e.msg) || print(io, e.msg, "\n")
 	tol_desc = e.rtol > 0 ? "atol=$(e.atol), rtol=$(e.rtol)" : "atol=$(e.atol)"
-	print(io, "$(length(e.violations)) test constraints exceed tolerance (defaults: $tol_desc):")
+	print(io, "$(length(e.violations)) test constraints exceed tolerance (configured defaults: $tol_desc; inequalities use zero when not configured):")
 	for (name, distance, tolerance, message) in e.violations
 		print(io, "\n  $(name): distance=$(distance), tolerance=$(tolerance)")
 		isempty(message) || print(io, ": ", message)

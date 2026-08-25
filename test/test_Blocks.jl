@@ -1253,6 +1253,42 @@ end
 	@test inequality_error isa TestConstraintError
 	@test length(inequality_error.violations) == 2
 
+	default_tolerance_constraints = @block m_bad begin
+		@test_constraint("equality within default tolerance")
+		x, x == 1.0000005
+		@test_constraint("strict lower bound")
+		x, x >= 1.0000005
+		@test_constraint("strict upper bound")
+		x, x <= 0.9999995
+	end
+	default_tolerance_error = try
+		assert_test_constraints(default_tolerance_constraints, failing_data)
+		nothing
+	catch e
+		e
+	end
+	@test default_tolerance_error isa TestConstraintError
+	@test length(default_tolerance_error.violations) == 2
+	@test all(violation[3] == 0 for violation in default_tolerance_error.violations)
+	@test assert_test_constraints(default_tolerance_constraints, failing_data; atol=1e-6, rtol=0)
+
+	explicit_inequality_tolerance = @block m_bad begin
+		@test_constraint("lower bound with tolerance"; atol=1e-6)
+		x, x >= 1.0000005
+		@test_constraint("upper bound with tolerance"; rtol=1e-6)
+		x, x <= 0.9999995
+	end
+	@test assert_test_constraints(explicit_inequality_tolerance, failing_data)
+
+	large_inequality_data = copy(failing_data)
+	large_inequality_data[x] = 1e8
+	large_inequality = @block m_bad begin
+		@test_constraint("strict relative lower bound")
+		x, x >= 1e8 + 0.5
+	end
+	@test_throws TestConstraintError assert_test_constraints(large_inequality, large_inequality_data)
+	@test assert_test_constraints(large_inequality, large_inequality_data; rtol=1e-8)
+
 	manual_residual = @block m begin
 		@test_constraint("a aggregation with residual")
 		a[t = periods],
