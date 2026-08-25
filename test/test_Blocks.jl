@@ -106,24 +106,34 @@ end
 end
 
 @testset "@block accepts multiline equation continuations" begin
-	m = Model()
+	m = Model(Ipopt.Optimizer)
+	set_silent(m)
 	JuMP.@variables m begin
 		x
 		a
 		b
 		c
+		d
 		q
 	end
 
 	block = @block m begin
 		x, x == a
-			+ b
-			- c
+			+ b + c
+			- d / q + 2a
 	end
 
 	@test length(block) == 1
-	@test all(v ∈ block.variables for v in [a, b, c])
-	@test q ∉ block.variables
+	@test all(v ∈ block.variables for v in [a, b, c, d, q])
+
+	db = ModelDictionary(m)
+	db[a] = 1.0
+	db[b] = 2.0
+	db[c] = 3.0
+	db[d] = 8.0
+	db[q] = 4.0
+	result = solve(block, db)
+	@test result[x] ≈ 6.0
 end
 
 @testset "@block rejects stray block expressions" begin
@@ -1281,6 +1291,42 @@ end
 	end
 	@test inequality_error isa TestConstraintError
 	@test length(inequality_error.violations) == 2
+
+	default_tolerance_constraints = @block m_bad begin
+		@test_constraint("equality within default tolerance")
+		x, x == 1.0000005
+		@test_constraint("strict lower bound")
+		x, x >= 1.0000005
+		@test_constraint("strict upper bound")
+		x, x <= 0.9999995
+	end
+	default_tolerance_error = try
+		assert_test_constraints(default_tolerance_constraints, failing_data)
+		nothing
+	catch e
+		e
+	end
+	@test default_tolerance_error isa TestConstraintError
+	@test length(default_tolerance_error.violations) == 2
+	@test all(violation[3] == 0 for violation in default_tolerance_error.violations)
+	@test assert_test_constraints(default_tolerance_constraints, failing_data; atol=1e-6, rtol=0)
+
+	explicit_inequality_tolerance = @block m_bad begin
+		@test_constraint("lower bound with tolerance"; atol=1e-6)
+		x, x >= 1.0000005
+		@test_constraint("upper bound with tolerance"; rtol=1e-6)
+		x, x <= 0.9999995
+	end
+	@test assert_test_constraints(explicit_inequality_tolerance, failing_data)
+
+	large_inequality_data = copy(failing_data)
+	large_inequality_data[x] = 1e8
+	large_inequality = @block m_bad begin
+		@test_constraint("strict relative lower bound")
+		x, x >= 1e8 + 0.5
+	end
+	@test_throws TestConstraintError assert_test_constraints(large_inequality, large_inequality_data)
+	@test assert_test_constraints(large_inequality, large_inequality_data; rtol=1e-8)
 
 	manual_residual = @block m begin
 		@test_constraint("a aggregation with residual")

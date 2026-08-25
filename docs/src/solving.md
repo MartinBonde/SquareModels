@@ -75,8 +75,9 @@ the model but has no data value yet.
 
 After a successful solve, `solve` and `solve!` run each `@test_constraint` entry
 in the block. Test constraints can use `==`, `<=`, or `>=` and do not enter the
-solve model. Set the default tolerances with `test_constraint_atol` and
-`test_constraint_rtol` (defaults: `1e-6` and `1e-8`):
+solve model. Equalities default to `atol=1e-6` and `rtol=1e-8`. Inequalities
+default to zero for both tolerances. Set defaults for all constraint types with
+`test_constraint_atol` and `test_constraint_rtol`:
 
 ```julia
 solution = solve(block, data; test_constraint_atol=1e-8, test_constraint_rtol=1e-6)
