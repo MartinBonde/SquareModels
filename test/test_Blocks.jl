@@ -106,24 +106,34 @@ end
 end
 
 @testset "@block accepts multiline equation continuations" begin
-	m = Model()
+	m = Model(Ipopt.Optimizer)
+	set_silent(m)
 	JuMP.@variables m begin
 		x
 		a
 		b
 		c
+		d
 		q
 	end
 
 	block = @block m begin
 		x, x == a
-			+ b
-			- c
+			+ b + c
+			- d / q + 2a
 	end
 
 	@test length(block) == 1
-	@test all(v ∈ block.variables for v in [a, b, c])
-	@test q ∉ block.variables
+	@test all(v ∈ block.variables for v in [a, b, c, d, q])
+
+	db = ModelDictionary(m)
+	db[a] = 1.0
+	db[b] = 2.0
+	db[c] = 3.0
+	db[d] = 8.0
+	db[q] = 4.0
+	result = solve(block, db)
+	@test result[x] ≈ 6.0
 end
 
 @testset "@block rejects stray block expressions" begin

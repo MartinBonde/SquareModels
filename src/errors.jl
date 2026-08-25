@@ -125,7 +125,7 @@ end
 
 Thrown when a block is not square or is not effectively square after data
 substitution. `msg` is a one-line summary. Extra rows go in `mappings`,
-`trivial`, and `orphans` so [`showerror`](@ref Base.showerror) can print them
+`trivial`, and `orphans` so `showerror` can print them
 as tables. Do not put those lists in `msg`: Julia `show` escapes newlines, and
 hosts that call `show` instead of `showerror` then dump one long line.
 """
