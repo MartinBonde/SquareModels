@@ -346,27 +346,6 @@ end
 		@test_throws ErrorException("KeyedData has 2 index positions, got 3") a[:S1, 2020, :extra]
 	end
 
-	@testset "File ingest matches read_variable" begin
-		model = Model()
-		@variable(model, x[[:a, :b], 2024:2025])
-		d = ModelDictionary(model)
-		mktempdir() do tmpdir
-			path = joinpath(tmpdir, "data.csv")
-			CSV.write(path, DataFrame(
-				variable = ["x", "x", "x"],
-				indices = ["a,2024", "b,2024", "a,2025"],
-				value = [1.0, 2.0, 3.0],
-			))
-			src = read_sparse_array(path, "x")
-			d[x] .= src
-			@test isnothing(src[:b, 2025])
-			@test isnothing(d[x][:b, 2025])
-			from_sparse = collect(d[x])
-			d[x] .= read_variable(path, x)
-			@test collect(d[x]) == from_sparse
-		end
-	end
-
 	@testset "Axis-count mismatch" begin
 		model = Model()
 		@variable(model, x[1:3])

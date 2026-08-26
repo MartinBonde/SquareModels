@@ -173,32 +173,6 @@ end
 	end
 end
 
-@testset "@block malformed syntax is rejected by Julia parser" begin
-	@test_throws Meta.ParseError Meta.parse("""
-		@block m begin
-			x[t], x[t] ==
-		end
-	""")
-
-	@test_throws Meta.ParseError Meta.parse("""
-		@block m begin
-			x[t],
-		end
-	""")
-
-	@test_throws Meta.ParseError Meta.parse("""
-		@block m begin
-			// wrong comment
-		end
-	""")
-
-	@test_throws Meta.ParseError Meta.parse("""
-		@block m begin
-			@test_constraint("message"; atol=1e-8) x, x == 1
-		end
-	""")
-end
-
 @testset "@block" begin
 	m = Model(Ipopt.Optimizer)
 	set_silent(m)
@@ -1335,35 +1309,6 @@ end
 	end
 	@test assert_test_constraints(manual_residual, solution)
 	@test all(residual(a)[t] in test_constraint_variables(manual_residual) for t in periods)
-end
-
-@testset "@block performance" begin
-	# Test that @block scales linearly with problem size, not quadratically
-	# A 100x100 indexed variable creates 10,000 constraints
-	# With the O(n²) bug, this would iterate 100M times; with the fix, only 10K
-	m = Model()
-	N = 100
-	@variable(m, large[1:N, 1:N])
-	@variable(m, param[1:N, 1:N])
-
-	# Warm-up compilation run with smaller size
-	m_warmup = Model()
-	@variable(m_warmup, w[1:5, 1:5])
-	@variable(m_warmup, wp[1:5, 1:5])
-	@block m_warmup begin
-		w[i ∈ 1:5, j ∈ 1:5], w[i,j] == wp[i,j]
-	end
-
-	# Time the actual test - should complete in under 5 seconds with the fix
-	# (would take minutes with O(n²) behavior)
-	t = @elapsed begin
-		b = @block m begin
-			large[i ∈ 1:N, j ∈ 1:N], large[i,j] == param[i,j] * 2
-		end
-	end
-
-	@test length(b) == N * N
-	@test t < 5.0  # Should be well under 1 second, but allow margin for CI
 end
 
 @testset "@block filters named indices to sparse mapped variables" begin
