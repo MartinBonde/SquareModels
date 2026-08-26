@@ -15,6 +15,7 @@ Base.:*(::Zero, ::Zero) = Zero()
 Base.:*(::Zero, _) = Zero()
 Base.:*(_, ::Zero) = Zero()
 Base.:-(::Zero) = Zero()
+Base.:-(::Zero, ::Zero) = Zero()
 Base.:-(x, ::Zero) = x
 Base.:-(::Zero, x) = -x
 Base.:/(::Zero, _) = Zero()
@@ -88,10 +89,12 @@ _index_pattern(s::SparseZeroArray) =
     SparseIndexPattern(collect(keys(s)), map(copy, s.domain))
 _index_pattern(s::SparseAxisArray) =
     SparseIndexPattern(collect(keys(s.data)), _domain_from_keys(s))
+_index_pattern(kd::KeyedData) =
+    SparseIndexPattern(collect(keys(kd)), _domain_from_keys(kd))
 _index_pattern(s::SparseIndexPattern) =
     SparseIndexPattern(s.coordinates, map(copy, s.domain))
 
-const _IndexPatternSource = Union{SparseZeroArray,SparseAxisArray,SparseIndexPattern}
+const _IndexPatternSource = Union{KeyedData,SparseZeroArray,SparseAxisArray,SparseIndexPattern}
 
 function _select_pattern_axes(indices::SparseIndexPattern, selected::Tuple{Vararg{Int}})
     n = length(indices.domain)
@@ -407,6 +410,8 @@ _domain_key(k) = k
 _domain_from_keys(saa::SparseAxisArray{T,1}) where {T} = (Set(_domain_key(k) for k in keys(saa.data)),)
 _domain_from_keys(saa::SparseAxisArray{T,N}) where {T,N} =
     ntuple(dim -> Set(k[dim] for k in keys(saa.data)), N)
+_domain_from_keys(kd::KeyedData{N}) where {N} =
+    ntuple(dim -> Set(key[dim] for key in keys(kd)), N)
 
 """
     _domain_from_nested(ni::Containers.NestedIterator, N)

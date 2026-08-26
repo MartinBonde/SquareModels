@@ -211,6 +211,203 @@ end
 	@test count('\n', limited_prt) < count('\n', unlimited_prt)
 end
 
+@testset "Sparse source assignment aligns domains" begin
+	model = Model()
+	@variable(model, x[[:a, :b], 1:3])
+	d = ModelDictionary(model)
+	d[x] .= KeyedData([
+		(:a, 2) => 10.0,
+		(:b, 2) => -3.0,
+		(:b, 3) => 23.0,
+	])
+	@test collect(d[x]) == Union{Nothing,Number}[
+		nothing  10.0  nothing
+		nothing  -3.0  23.0
+	]
+end
+
+@testset "KeyedData construction and coordinate helpers" begin
+	raw = Dict()
+	raw[(:a, 1)] = 10.0
+	data = KeyedData(raw)
+	@test ndims(data) == 2
+	@test data[:a, 1] == 10.0
+	@test isnothing(data[:b, 2])
+
+	empty_data = KeyedData(Dict{Tuple{Symbol,Int},Float64}())
+	@test ndims(empty_data) == 2
+	@test isempty(empty_data)
+	@test_throws ErrorException KeyedData(Dict())
+	@test_throws ArgumentError KeyedData(Pair{Tuple,Float64}[])
+	@test_throws ErrorException KeyedData(Dict(:a => 1.0))
+	@test_throws ErrorException KeyedData([(:a,) => 1.0, (:b, 2) => 2.0])
+
+	other = KeyedData([(:b, 2) => 20.0])
+	@test Set(select_axes(data, 1)) == Set([(:a,)])
+	@test Set(merge_indices(data, other)) == Set([(:a, 1), (:b, 2)])
+
+	model = Model()
+	SquareModels.@variables model begin
+		x[(i, t) = data]
+	end
+	@test Set(keys(x)) == Set([(:a, 1)])
+	@test x.domain == (Set([:a]), Set([1]))
+end
+
+@testset "Keyed sparse assignment" begin
+	OrderedDict = JuMP.Containers.OrderedCollections.OrderedDict
+	sparse_axis(pairs) = JuMP.Containers.SparseAxisArray(OrderedDict(pairs))
+
+	@testset "Plain SparseAxisArray to a dense target" begin
+		model = Model()
+		@variable(model, x[[:a, :b], 1:2])
+		d = ModelDictionary(model)
+		source = sparse_axis([(:b, 2) => 20.0, (:a, 1) => 10.0, (:c, 9) => 99.0])
+		d[x] .= source
+		@test d[x][:a, 1] == 10.0
+		@test isnothing(d[x][:a, 2])
+		@test isnothing(d[x][:b, 1])
+		@test d[x][:b, 2] == 20.0
+	end
+
+	@testset "Plain SparseAxisArray to sparse targets" begin
+		try
+			for use_zero in (false, true)
+				use_sparse_zero_array!(use_zero)
+				model = Model()
+				SquareModels.@variables model begin
+					x[i = [:a, :b], t = 1:2; (i, t) in [(:a, 1), (:a, 2), (:b, 1)]]
+				end
+				d = ModelDictionary(model)
+				source = sparse_axis([(:b, 1) => 3.0, (:a, 1) => 1.0, (:b, 2) => 99.0])
+				d[x] .= source
+				@test (x isa SparseZeroArray) == use_zero
+				@test d[x][:a, 1] == 1.0
+				@test isnothing(d[x][:a, 2])
+				@test d[x][:b, 1] == 3.0
+			end
+		finally
+			use_sparse_zero_array!(true)
+		end
+	end
+
+	@testset "Stored zero is data" begin
+		model = Model()
+		@variable(model, x[[:a, :b], 1:2])
+		d = ModelDictionary(model)
+		d[x] .= sparse_axis([(:a, 1) => 0.0, (:b, 2) => 1.0])
+		@test d[x][:a, 1] == 0.0
+		@test isnothing(d[x][:a, 2])
+		@test isnothing(d[x][:b, 1])
+		@test d[x][:b, 2] == 1.0
+
+		d[x] .= KeyedData([(:a, 1) => 0.0, (:b, 2) => 1.0])
+		@test d[x][:a, 1] == 0.0
+		@test isnothing(d[x][:a, 2])
+		@test isnothing(d[x][:b, 1])
+		@test d[x][:b, 2] == 1.0
+	end
+
+	@testset "Assignment clears old data" begin
+		model = Model()
+		@variable(model, x[[:a, :b], 1:2])
+		d = ModelDictionary(model)
+		d[x] .= 7.0
+		d[x] .= sparse_axis([(:a, 2) => 4.0])
+		@test isnothing(d[x][:a, 1])
+		@test d[x][:a, 2] == 4.0
+		@test isnothing(d[x][:b, 1])
+		@test isnothing(d[x][:b, 2])
+		d[x] .= sparse_axis([(:c, 9) => 8.0])
+		@test all(isnothing, d[x])
+	end
+
+	@testset "Sliced source cube" begin
+		model = Model()
+		@variable(model, x[[:S1, :S2], 2020:2021])
+		d = ModelDictionary(model)
+		source = KeyedData(Dict(
+			(:S1, :D5, 2020) => 1.0,
+			(:S1, :D61, 2020) => 2.0,
+			(:S2, :D5, 2021) => 3.0,
+		))
+		d[x] .= source[:, :D5, :]
+		@test d[x][:S1, 2020] == 1.0
+		@test isnothing(d[x][:S1, 2021])
+		@test isnothing(d[x][:S2, 2020])
+		@test d[x][:S2, 2021] == 3.0
+		d[x] .= source[:, :D99, :]
+		@test all(isnothing, d[x])
+	end
+
+	@testset "Indexing needs one argument per index position" begin
+		a = KeyedData([(:S1, 2020) => 1.0])
+		@test_throws ErrorException("KeyedData has 2 index positions, got 1") a[:S1]
+		@test_throws ErrorException("KeyedData has 2 index positions, got 3") a[:S1, 2020, :extra]
+	end
+
+	@testset "File ingest matches read_variable" begin
+		model = Model()
+		@variable(model, x[[:a, :b], 2024:2025])
+		d = ModelDictionary(model)
+		mktempdir() do tmpdir
+			path = joinpath(tmpdir, "data.csv")
+			CSV.write(path, DataFrame(
+				variable = ["x", "x", "x"],
+				indices = ["a,2024", "b,2024", "a,2025"],
+				value = [1.0, 2.0, 3.0],
+			))
+			src = read_sparse_array(path, "x")
+			d[x] .= src
+			@test isnothing(src[:b, 2025])
+			@test isnothing(d[x][:b, 2025])
+			from_sparse = collect(d[x])
+			d[x] .= read_variable(path, x)
+			@test collect(d[x]) == from_sparse
+		end
+	end
+
+	@testset "Axis-count mismatch" begin
+		model = Model()
+		@variable(model, x[1:3])
+		d = ModelDictionary(model)
+		source = sparse_axis([(:a, 1) => 1.0])
+		@test_throws(
+			ErrorException("Cannot assign sparse data with 2 index axes to a window with 1 index axes"),
+			d[x] .= source,
+		)
+		@test_throws(
+			ErrorException("Cannot assign sparse data with 2 index axes to a window with 1 index axes"),
+			d[x] .= KeyedData([(:a, 1) => 1.0]),
+		)
+	end
+end
+
+@testset "ModelDictionary broadcast propagates nothing" begin
+	model = Model()
+	@variable(model, x[1:3])
+	d = ModelDictionary(model)
+	d[x] .= [nothing, 2.0, nothing]
+	d2 = d .+ 5.0
+	@test isnothing(d2[x[1]])
+	@test d2[x[2]] == 7.0
+	@test isnothing(d2[x[3]])
+	d3 = d .* 2.0
+	@test isnothing(d3[x[1]])
+	@test d3[x[2]] == 4.0
+	d4 = .-d
+	@test isnothing(d4[x[1]])
+	@test d4[x[2]] == -2.0
+	@test isnothing(d4[x[3]])
+
+	baseline = ModelDictionary(model)
+	baseline[x] .= [1.0, 2.0, nothing]
+	difference = baseline .- d
+	@test isnothing(difference[x[1]])
+	@test difference[x[2]] == 0.0
+	@test isnothing(difference[x[3]])
+end
+
 @testset "Test getting and setting single variables refs" begin
 	b = ModelDictionary(model)
 
@@ -809,9 +1006,9 @@ end
 			@test read_indices(data_path) == [:a 2024; :b 2024; :a 2025]
 
 			data = read_sparse_array(data_path)
-			@test data isa SparseZeroArray
+			@test data isa KeyedData
 			@test data[:a, 2024] == 1.0
-			@test data[:b, 2025] == SquareModels.Zero()
+			@test isnothing(data[:b, 2025])
 
 			@test read_variable(data_path, x) == [get(keyed, key.I, nothing) for key in keys(x)]
 			@test read_variable(data_path, x; default=0.0) == [get(keyed, key.I, 0.0) for key in keys(x)]
@@ -819,7 +1016,7 @@ end
 			@test read_variable(data_path, x; default=-1.0)[2, 2] == -1.0
 
 			index_data = read_sparse_array(set_path)
-			@test index_data isa SparseZeroArray
+			@test index_data isa KeyedData
 			@test index_data[:a] == 1.0
 		end
 

@@ -318,7 +318,9 @@ Base.show(io::IO, w::Window) = show(io, MIME"text/plain"(), w)
 
 Base.getindex(w::Window, index::AbstractArray) = length(index) == 1 ? getindex(w, index[]) : getindex.(Ref(w), index)
 _window_slice(w::Window, index::Integer) = w.data_view[index]
-_window_slice(::Window, zero::Zero) = zero
+# A Window holds data, not an expression, so an unstored cell reads as no
+# observation. `Zero()` is only the additive identity for equation building.
+_window_slice(::Window, ::Zero) = nothing
 _window_slice(w::Window, indices::AbstractArray) = map(i -> w.data_view[i], Array(indices))
 function _window_slice(w::Window, indices::SparseAxisArray)
 	values = similar(indices, eltype(w.data_view))
@@ -342,20 +344,43 @@ Base.vec(w::Window) = vec(collect(w))
 Base.broadcastable(w::Window{<:Any,<:_SparseTableArray}) = _window_slice(w, w.indices)
 Base.broadcastable(w::Window) = w.shaped_view
 
-# For broadcast assignment (w .= x), materialize into the underlying data
-function _set_window!(w::Window{<:Any,<:_SparseTableArray}, values::_SparseTableArray)
-	target = _sparse_axis_array(w.indices)
-	source = _sparse_axis_array(values)
-	@assert length(target.data) == length(source.data) &&
-		all(key -> haskey(source.data, key), keys(target.data)) "Sparse Window assignment needs matching stored keys"
-	for key in keys(target.data)
-		w.data_view[target[key...]] = values[key...]
+# For broadcast assignment (w .= x), materialize into the underlying data.
+# Keyed sparse sources align by index tuple. An unstored source key is `nothing`.
+_window_keys(indices::SparseAxisArray) = keys(indices.data)
+_window_keys(indices::SparseZeroArray) = eachindex(indices)
+_window_keys(indices) = keys(indices)
+
+# Read one coordinate of a keyed source. A key the source does not store has no observation.
+_source_at(kd::KeyedData, key::Tuple) = get(kd.data, key, nothing)
+_source_at(s::SparseAxisArray, key::Tuple) = get(s.data, key, nothing)
+
+_set_window!(w::Window, source::SparseZeroArray) = _set_window!(w, source.data)
+_set_window!(w::Window, source::SparseAxisArray) = _assign_keyed_source!(w, source)
+_set_window!(w::Window, source::KeyedData) = _assign_keyed_source!(w, source)
+function _set_window!(w::Window, source::AbstractArray)
+	w.data_view .= vec(source)
+	return w
+end
+function _set_window!(w::Window, value)
+	w.data_view .= value
+	return w
+end
+
+function _assign_keyed_source!(w::Window, source)
+	n_source = ndims(source)
+	n_target = ndims(w.indices)
+	n_target == n_source || error(
+		"Cannot assign sparse data with $n_source index axes to a window with $n_target index axes",
+	)
+	for key in _window_keys(w.indices)
+		idx = _index_tuple(key)
+		w.data_view[w.indices[idx...]] = _source_at(source, idx)
 	end
 	return w
 end
-_set_window!(w::Window, values::AbstractArray) = (w.data_view .= vec(values); w)
-_set_window!(w::Window, value) = (w.data_view .= value; w)
 
+# `w .= source` routes here. A KeyedData source is a 0-dimensional broadcast, which
+# `Base.materialize` unwraps back to the KeyedData.
 Base.materialize!(w::Window, bc::Base.Broadcast.Broadcasted) =
 	_set_window!(w, Base.materialize(bc))
 
@@ -804,10 +829,14 @@ end
     read_sparse_array(path::AbstractString; variable=nothing)
     read_sparse_array(path::AbstractString, variable)
 
-Read a simple `(variable, indices, value)` file as a [`SparseZeroArray`](@ref).
+Read a simple `(variable, indices, value)` CSV or Parquet file.
 
 When `variable` is given, only rows with that base name are read. Indices are parsed
 as in [`read_indices`](@ref).
+
+# Returns
+A [`KeyedData`](@ref) keyed by the parsed index tuples. A coordinate that the file
+does not store reads as `nothing`.
 
 # Examples
 ```julia
@@ -818,7 +847,7 @@ read_sparse_array("data.csv"; variable="x")
 
 See also: [`read_variable`](@ref), [`read_indices`](@ref), [`load`](@ref)
 """
-read_sparse_array(path::AbstractString; variable=nothing) = SparseZeroArray(_read_simple_keyed(path; variable))
+read_sparse_array(path::AbstractString; variable=nothing) = KeyedData(_read_simple_keyed(path; variable))
 read_sparse_array(path::AbstractString, variable) = read_sparse_array(path; variable)
 
 """

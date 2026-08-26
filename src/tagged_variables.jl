@@ -336,6 +336,14 @@ function _destructured_axis(source::SparseAxisArray, arity, unpack)
     return _unpack_parts(keys(source.data), arity), domain
 end
 
+function _destructured_axis(source::KeyedData, arity, unpack)
+    unpack || error("Unpack a KeyedData with (i, j, ...) = data")
+    domain = _domain_from_keys(source)
+    length(domain) == arity ||
+        error("The destructured index has $arity names, but the data has $(length(domain)) axes")
+    return _unpack_parts(keys(source), arity), domain
+end
+
 function _destructured_axis(source::SparseIndexPattern, arity, unpack)
     unpack || error("Unpack selected axes with (i, j, ...) = select_axes(...)")
     length(source.domain) == arity ||

@@ -18,6 +18,7 @@ export RESIDUAL_SUFFIX
 export solve, solve!, diagnose, annotate_lst!, square_model
 export Tag, description, tags, has_tag, tagged, metadata
 export SparseZeroArray, select_axes, merge_indices, ∑, use_sparse_zero_array!
+export KeyedData
 export ModelExpressions, ModelPlotting, @plot, @evalexpr, @prt, plotvar, plotseries, alternating_dash!, labeled, LabeledSeries, LabeledArray, MultiVarResult, AbstractSeries, set_plot_finalize!, reset_plot_finalize!, plot_finalize
 export set_default_source!, set_default_operator!, set_default_periods!, set_column_label_total_width!, reset_print_defaults!
 
@@ -45,6 +46,7 @@ const _name_lookup_cache = WeakKeyDict{AbstractModel, Dict{String, VariableRef}}
 
 include("errors.jl")
 include("utils.jl")
+include("KeyedData.jl")
 include("SparseZeroArrays.jl")
 include("TableDisplay.jl")
 
