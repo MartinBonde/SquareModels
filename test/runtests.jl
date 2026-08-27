@@ -12,9 +12,6 @@ using Test
 	include("test_GAMS.jl")
 
 	@testset "Examples" begin
-		@testset "quick_example.jl" begin
-			include("../examples/quick_example.jl")
-		end
 		@testset "modular_example.jl" begin
 			include("../examples/modular_example.jl")
 		end

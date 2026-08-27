@@ -6,7 +6,7 @@ using JuMP: Model, set_optimizer_attribute, get_optimizer_attribute, @variable, 
 using SquareModels
 import GAMS
 
-const GAMS_SYSDIR = "C:/GAMS/53"
+const GAMS_SYSDIR = raw"C:\GAMS\52"
 
 # Probe whether the GAMS runtime (not just the Julia package) is installed
 const GAMS_AVAILABLE = try

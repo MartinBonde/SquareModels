@@ -212,7 +212,11 @@ d = load("data.gdx", model;
 
 For reading a single variable without building a full dictionary, use
 [`read_variable`](@ref), [`read_sparse_array`](@ref), or [`read_indices`](@ref) on
-simple-format CSV/Parquet files.
+simple-format CSV/Parquet files. [`read_sparse_array`](@ref) returns a
+[`KeyedData`](@ref), which keeps only the coordinates that the file stores. A
+coordinate that the file does not store reads as `nothing`, not `Zero()`.
+Its stored coordinates can be reused with [`select_axes`](@ref),
+[`merge_indices`](@ref), or as a tuple-destructured [`@variables`](@ref) source.
 
 ## Variable Metadata
 

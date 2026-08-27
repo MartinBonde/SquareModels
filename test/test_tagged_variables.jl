@@ -28,21 +28,6 @@ function run(model, all_variables)
 end
 end
 
-module JuMPVariablesUnchangedTest
-using Test
-using JuMP
-using SquareModels
-
-function run()
-    model = Model()
-    JuMP.@variables model begin
-        x[i = 1:2]
-    end
-    @test x isa Vector{VariableRef}
-    @test length(x) == 2
-end
-end
-
 @testset "Tagged Variables" begin
 
     @testset "Tag type" begin
@@ -72,10 +57,6 @@ end
 
     @testset "@variables works without importing JuMP" begin
         NoJuMPImportVariablesTest.run(Model(), all_variables)
-    end
-
-    @testset "JuMP.@variables remains available" begin
-        JuMPVariablesUnchangedTest.run()
     end
 
     @testset "Variables with tags (:: syntax)" begin

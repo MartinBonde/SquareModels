@@ -2,16 +2,14 @@ module TestUtils
 
 using Test
 using SquareModels
-include("../src/utils.jl")
+using SquareModels: @replace_vars, @q, @pq, @m
 
 @testset "Test @replace_vars" begin
-  xy = Dict(:x => rand(), :y => rand())
-  z = rand()
+  xy = Dict(:x => 1.1, :y => 1.2)
+  z = 0.3
 
-  @macroexpand @replace_vars(x + y, xy)
   @test @replace_vars(x + y, xy) == @replace_vars(y + x, xy) == xy[:x] + xy[:y]
 
-  @macroexpand @replace_vars(x + z, xy)
   @test @replace_vars(x + z, xy) == @replace_vars(z + x, xy) == xy[:x] + z
 end
 
