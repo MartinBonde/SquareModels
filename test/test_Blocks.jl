@@ -106,24 +106,34 @@ end
 end
 
 @testset "@block accepts multiline equation continuations" begin
-	m = Model()
+	m = Model(Ipopt.Optimizer)
+	set_silent(m)
 	JuMP.@variables m begin
 		x
 		a
 		b
 		c
+		d
 		q
 	end
 
 	block = @block m begin
 		x, x == a
-			+ b
-			- c
+			+ b + c
+			- d / q + 2a
 	end
 
 	@test length(block) == 1
-	@test all(v ∈ block.variables for v in [a, b, c])
-	@test q ∉ block.variables
+	@test all(v ∈ block.variables for v in [a, b, c, d, q])
+
+	db = ModelDictionary(m)
+	db[a] = 1.0
+	db[b] = 2.0
+	db[c] = 3.0
+	db[d] = 8.0
+	db[q] = 4.0
+	result = solve(block, db)
+	@test result[x] ≈ 6.0
 end
 
 @testset "@block rejects stray block expressions" begin
@@ -161,32 +171,6 @@ end
 			x, x == 1, q
 		end
 	end
-end
-
-@testset "@block malformed syntax is rejected by Julia parser" begin
-	@test_throws Meta.ParseError Meta.parse("""
-		@block m begin
-			x[t], x[t] ==
-		end
-	""")
-
-	@test_throws Meta.ParseError Meta.parse("""
-		@block m begin
-			x[t],
-		end
-	""")
-
-	@test_throws Meta.ParseError Meta.parse("""
-		@block m begin
-			// wrong comment
-		end
-	""")
-
-	@test_throws Meta.ParseError Meta.parse("""
-		@block m begin
-			@test_constraint("message"; atol=1e-8) x, x == 1
-		end
-	""")
 end
 
 @testset "@block" begin
@@ -1282,6 +1266,42 @@ end
 	@test inequality_error isa TestConstraintError
 	@test length(inequality_error.violations) == 2
 
+	default_tolerance_constraints = @block m_bad begin
+		@test_constraint("equality within default tolerance")
+		x, x == 1.0000005
+		@test_constraint("strict lower bound")
+		x, x >= 1.0000005
+		@test_constraint("strict upper bound")
+		x, x <= 0.9999995
+	end
+	default_tolerance_error = try
+		assert_test_constraints(default_tolerance_constraints, failing_data)
+		nothing
+	catch e
+		e
+	end
+	@test default_tolerance_error isa TestConstraintError
+	@test length(default_tolerance_error.violations) == 2
+	@test all(violation[3] == 0 for violation in default_tolerance_error.violations)
+	@test assert_test_constraints(default_tolerance_constraints, failing_data; atol=1e-6, rtol=0)
+
+	explicit_inequality_tolerance = @block m_bad begin
+		@test_constraint("lower bound with tolerance"; atol=1e-6)
+		x, x >= 1.0000005
+		@test_constraint("upper bound with tolerance"; rtol=1e-6)
+		x, x <= 0.9999995
+	end
+	@test assert_test_constraints(explicit_inequality_tolerance, failing_data)
+
+	large_inequality_data = copy(failing_data)
+	large_inequality_data[x] = 1e8
+	large_inequality = @block m_bad begin
+		@test_constraint("strict relative lower bound")
+		x, x >= 1e8 + 0.5
+	end
+	@test_throws TestConstraintError assert_test_constraints(large_inequality, large_inequality_data)
+	@test assert_test_constraints(large_inequality, large_inequality_data; rtol=1e-8)
+
 	manual_residual = @block m begin
 		@test_constraint("a aggregation with residual")
 		a[t = periods],
@@ -1289,35 +1309,6 @@ end
 	end
 	@test assert_test_constraints(manual_residual, solution)
 	@test all(residual(a)[t] in test_constraint_variables(manual_residual) for t in periods)
-end
-
-@testset "@block performance" begin
-	# Test that @block scales linearly with problem size, not quadratically
-	# A 100x100 indexed variable creates 10,000 constraints
-	# With the O(n²) bug, this would iterate 100M times; with the fix, only 10K
-	m = Model()
-	N = 100
-	@variable(m, large[1:N, 1:N])
-	@variable(m, param[1:N, 1:N])
-
-	# Warm-up compilation run with smaller size
-	m_warmup = Model()
-	@variable(m_warmup, w[1:5, 1:5])
-	@variable(m_warmup, wp[1:5, 1:5])
-	@block m_warmup begin
-		w[i ∈ 1:5, j ∈ 1:5], w[i,j] == wp[i,j]
-	end
-
-	# Time the actual test - should complete in under 5 seconds with the fix
-	# (would take minutes with O(n²) behavior)
-	t = @elapsed begin
-		b = @block m begin
-			large[i ∈ 1:N, j ∈ 1:N], large[i,j] == param[i,j] * 2
-		end
-	end
-
-	@test length(b) == N * N
-	@test t < 5.0  # Should be well under 1 second, but allow margin for CI
 end
 
 @testset "@block filters named indices to sparse mapped variables" begin

@@ -18,6 +18,7 @@ export RESIDUAL_SUFFIX
 export solve, solve!, diagnose, annotate_lst!, square_model
 export Tag, description, tags, has_tag, tagged, metadata
 export SparseZeroArray, select_axes, merge_indices, ∑, use_sparse_zero_array!
+export KeyedData
 export ModelExpressions, ModelPlotting, @plot, @evalexpr, @prt, plotvar, plotseries, alternating_dash!, labeled, LabeledSeries, LabeledArray, MultiVarResult, AbstractSeries, set_plot_finalize!, reset_plot_finalize!, plot_finalize
 export set_default_source!, set_default_operator!, set_default_periods!, set_column_label_total_width!, reset_print_defaults!
 
@@ -45,6 +46,7 @@ const _name_lookup_cache = WeakKeyDict{AbstractModel, Dict{String, VariableRef}}
 
 include("errors.jl")
 include("utils.jl")
+include("KeyedData.jl")
 include("SparseZeroArrays.jl")
 include("TableDisplay.jl")
 
@@ -963,7 +965,8 @@ constraint can use `==`, `<=`, or `>=`; Unicode `≤` and `≥` also work. The
 optional string appears in [`TestConstraintError`](@ref) output. The optional
 `atol` and `rtol` keywords override the matching tolerance passed to
 [`solve`](@ref), [`solve!`](@ref), or [`assert_test_constraints`](@ref) for this
-test constraint.
+test constraint. Without an explicit tolerance, equalities use `atol=1e-6` and
+`rtol=1e-8`; inequalities use zero for both.
 
 `@test_constraint` is valid only in an `@block` body. `solve` and `solve!` run
 all test constraints after a successful solve. Use
@@ -1056,7 +1059,28 @@ macro block(model, expr)
 	)
 	_is_equality(it) = isexpr(it, :call) && length(it.args) == 3 && it.args[1] == :(==)
 	_is_test_relation(it) = isexpr(it, :call) && length(it.args) == 3 && it.args[1] in (:(==), :(<=), :≤, :(>=), :≥)
-	_is_continuation(it) = isexpr(it, :call) && length(it.args) == 2 && it.args[1] in (:+, :-)
+	function _strip_leading_sign(it)
+		isexpr(it, :call) || return nothing
+		op = it.args[1]
+		length(it.args) == 2 && op in (:+, :-) && return (op, it.args[2])
+		length(it.args) >= 3 && op isa Symbol && Base.isoperator(op) || return nothing
+		stripped = _strip_leading_sign(it.args[2])
+		stripped === nothing && return nothing
+		sign, first_term = stripped
+		return sign, Expr(:call, op, first_term, it.args[3:end]...)
+	end
+	function _prepend_continuation(it, lhs)
+		isexpr(it, :call) || return nothing
+		if length(it.args) >= 3 && it.args[1] in (:+, :-)
+			first_term = _prepend_continuation(it.args[2], lhs)
+			first_term === nothing && return nothing
+			return Expr(:call, it.args[1], first_term, it.args[3:end]...)
+		end
+		stripped = _strip_leading_sign(it)
+		stripped === nothing && return nothing
+		sign, term = stripped
+		return Expr(:call, sign, lhs, term)
+	end
 	_macro_name(name::Symbol) = name
 	_macro_name(name::Expr) = name.head == :. && last(name.args) isa QuoteNode ? last(name.args).value : nothing
 	_is_test_constraint(it) = isexpr(it, :macrocall) && _macro_name(it.args[1]) == Symbol("@test_constraint")
@@ -1119,9 +1143,11 @@ macro block(model, expr)
 	            pending_test_constraint = (line_number, it, message, options[:atol], options[:rtol])
 	            last_tuple = nothing
 	        end
-	    elseif _is_continuation(it) && last_tuple !== nothing
+	    elseif last_tuple !== nothing
 	        eq = last_tuple.args[2]
-	        eq.args[3] = Expr(:call, it.args[1], eq.args[3], it.args[2])
+	        continuation = _prepend_continuation(it, eq.args[3])
+	        continuation === nothing && _error(line_number, it, "Unexpected code in block body")
+	        eq.args[3] = continuation
 	    else
 	        pending_test_constraint === nothing ||
 	            _error(line_number, it, "Each `@test_constraint` call must be followed by one `variable, equation` entry")
