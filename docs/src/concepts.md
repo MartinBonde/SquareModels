@@ -27,6 +27,21 @@ Dense mapped variables still use the full product of the named axis sets. The
 explicit tuple-key form, such as
 `x[(i, j, t) in keys(x); t > t₀]`, also stays valid.
 
+Axes without a name follow JuMP set syntax. Use a one-item set when the equation
+does not need the index name. A quoted symbol also selects one fixed label:
+
+```julia
+block = @block data begin
+    x[s=S, [:Equity], t=T], x[s, :Equity, t] == y[s, t]
+    z[s=S, :Liab, t=T], z[s, :Liab, t] == y[s, t]
+end
+```
+
+Here, `:Liab` means the same as `[:Liab]`. This short form applies only to a
+quoted symbol. A bare name, such as `financial_assets`, remains a JuMP index set.
+For sparse mapped variables, SquareModels checks named sets, unnamed sets, fixed
+labels, and the filter against the stored keys.
+
 Blocks can be combined with `+` as long as they belong to the same JuMP model and
 do not determine the same endogenous variable twice:
 
@@ -124,6 +139,7 @@ Use the same indexed form as `@block` to select cells on each side:
 ```julia
 @endo_exo_swap! calibration begin
     share[i = I, t = t₀], output[i = I, t = t₀]
+    share_exo[i = I, :Equity], share[i = I, [:Equity]]
 end
 ```
 

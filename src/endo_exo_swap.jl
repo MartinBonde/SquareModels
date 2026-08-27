@@ -16,10 +16,12 @@ _is_indexed_swap(expr) =
 	(isexpr(expr, :ref) && any(_is_swap_index, expr.args[2:end]))
 
 _swap_binding(axis) = begin
-	parsed = _named_constraint_axis(axis)
+	parsed = _constraint_axis(axis)
 	parsed === nothing ? nothing : first(parsed)
 end
 function _swap_binding(axis::Expr)
+	parsed = _constraint_axis(axis)
+	parsed === nothing || return first(parsed)
 	if (isexpr(axis, :kw) || isexpr(axis, :(=)))
 		return axis.args[1]
 	elseif isexpr(axis, :call) && length(axis.args) == 3 && axis.args[1] in (:in, :∈)
@@ -41,16 +43,14 @@ function _swap_selector_bindings(selector)
 	return bindings
 end
 
-function _swap_selector_body(selector)
-	bindings = _swap_selector_bindings(selector)
-	bindings === nothing && return nothing
-	key = Expr(:tuple, bindings...)
-	return :($(_index_var)($(_get_name(selector)), $key))
-end
-
 function _swap_selection_from_container(container)
 	keys = _all_keys(container)
 	return [_index_var(container, key) for key in keys]
+end
+
+function _swap_selection_from_container(variable, index_container)
+	keys = _all_keys(index_container)
+	return [_index_var(variable, key) for key in keys]
 end
 
 _swap_selection(value::AbstractVariableRef) = [value]
@@ -61,9 +61,8 @@ function _rewrite_swap_selection_keys(expr, jump_expression, source, setup)
 	   _is_indexed_swap(expr.args[2])
 		selector = expr.args[2]
 		container = gensym(:selection)
-		body = _swap_selector_body(selector)
 		push!(setup, _named_index_expression_code(
-			selector, jump_expression, source, container => body,
+			selector, jump_expression, source, container => 0,
 		))
 		keys = gensym(:keys)
 		bindings = _swap_selector_bindings(selector)
@@ -87,11 +86,10 @@ function _swap_selection_code(selector, jump_expression, source)
 	selector = _rewrite_swap_selection_keys(selector, jump_expression, source, setup)
 	if _is_indexed_swap(selector)
 		container = gensym(:selection)
-		body = _swap_selector_body(selector)
 		push!(setup, _named_index_expression_code(
-			selector, jump_expression, source, container => body,
+			selector, jump_expression, source, container => 0,
 		))
-		result = :($(_swap_selection_from_container)($container))
+		result = :($(_swap_selection_from_container)($(_get_name(selector)), $container))
 	else
 		result = :($(_swap_selection)($selector))
 	end
