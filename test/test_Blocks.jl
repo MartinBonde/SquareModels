@@ -795,6 +795,15 @@ end
 		@test isempty(endogenous(empty))
 	end
 
+	@testset "Empty indexed block" begin
+		empty = @block m begin
+			y[i = 1:5; false], y[i] == 0
+		end
+		@test length(empty) == 0
+		@test isempty(endogenous(empty))
+		@test !haskey(m, :y_J)
+	end
+
 	@testset "Single equation" begin
 		single = @block m begin
 			x, x == 1
