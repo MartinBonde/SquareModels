@@ -364,16 +364,34 @@ function _destructured_index_data(sources::Tuple, arities::Tuple, unpack::Tuple)
     return coordinates, domain
 end
 
+const _DEFAULT_SCALAR_VARIABLE = JuMP.ScalarVariable(
+    JuMP.VariableInfo(false, NaN, false, NaN, false, NaN, false, NaN, false, false),
+)
+
 function _attach_sparse_variable(model, name, coordinates, domain, index_names)
     haskey(model, name) && error("An object of name $name is already attached to this model")
     # Empty `Any[]` has no tuple eltype. JuMP's `_container_dict` needs `NTuple{N,Any}`.
     index_keys = isempty(coordinates) ? NTuple{length(index_names),Any}[] : coordinates
-    sparse_variable = Containers.container(
-        (indices...) -> JuMP.@variable(model, base_name = string(name, "[", join(indices, ","), "]")),
-        index_keys,
-        SparseAxisArray,
-        index_names,
-    )
+    variable = JuMP.model_convert(model, _DEFAULT_SCALAR_VARIABLE)
+    sparse_variable = if JuMP.set_string_names_on_creation(model)
+        Containers.container(
+            (indices...) -> JuMP.add_variable(
+                model,
+                variable,
+                string(name, "[", join(indices, ","), "]"),
+            ),
+            index_keys,
+            SparseAxisArray,
+            index_names,
+        )
+    else
+        Containers.container(
+            (indices...) -> JuMP.add_variable(model, variable),
+            index_keys,
+            SparseAxisArray,
+            index_names,
+        )
+    end
     variable = _use_sparse_zero_array[] ? SparseZeroArray(sparse_variable, domain) : sparse_variable
     model[name] = variable
     return variable

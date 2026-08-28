@@ -59,6 +59,18 @@ end
         NoJuMPImportVariablesTest.run(Model(), all_variables)
     end
 
+    @testset "Sparse variables honor the JuMP string-name setting" begin
+        model = Model()
+        JuMP.set_string_names_on_creation(model, false)
+        stored = Set([(1, :a), (2, :b)])
+        @variables model begin
+            sparse[i = 1:2, j = [:a, :b]; (i, j) in stored]
+            copied[(i, j) = sparse]
+        end
+        @test all(isempty(JuMP.name(variable)) for variable in sparse)
+        @test all(isempty(JuMP.name(variable)) for variable in copied)
+    end
+
     @testset "Variables with tags (:: syntax)" begin
         model = Model()
         t = 2020:2022

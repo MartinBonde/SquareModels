@@ -31,6 +31,35 @@ function run(m)
 end
 end
 
+module DeferredBlockTest
+using JuMP
+using SquareModels
+
+const model = Model()
+const years = 1:3
+SquareModels.@variables model begin
+	x[years]
+	y[years]
+end
+const build = SquareModels.@deferred_block model begin
+	x[t = years], x[t] == y[t]
+end
+end
+
+module DefaultDeferredBlockTest
+using JuMP
+using SquareModels
+
+function build(count)
+	model = Model()
+	@variable(model, x[1:count])
+	block = @block model begin
+		x[i = 1:count], x[i] == i
+	end
+	return model, block
+end
+end
+
 @testset "copy_variable" begin
 	m = Model()
 	JuMP.@variables m begin
@@ -58,6 +87,26 @@ end
 
 @testset "@block works without importing JuMP" begin
 	NoJuMPImportBlockTest.run(Model())
+end
+
+@testset "@deferred_block compiles on first call" begin
+	@test !haskey(DeferredBlockTest.model, :x_J)
+	first_block = DeferredBlockTest.build()
+	@test length(first_block) == 3
+	@test haskey(DeferredBlockTest.model, :x_J)
+	variable_count = JuMP.num_variables(DeferredBlockTest.model)
+	second_block = DeferredBlockTest.build()
+	@test length(second_block) == 3
+	@test JuMP.num_variables(DeferredBlockTest.model) == variable_count
+end
+
+@testset "@block reuses deferred code with new local values" begin
+	first_model, first_block = DefaultDeferredBlockTest.build(2)
+	second_model, second_block = DefaultDeferredBlockTest.build(4)
+	@test length(first_block) == 2
+	@test length(second_block) == 4
+	@test JuMP.num_variables(first_model) == 4
+	@test JuMP.num_variables(second_model) == 8
 end
 
 @testset "@_block" begin
