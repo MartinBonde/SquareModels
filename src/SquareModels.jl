@@ -687,14 +687,44 @@ function _residual_for(endo::VariableRef)
 	return resid
 end
 
-"""Collect index tuples from a JuMP container in iteration order."""
-_all_keys(c::AbstractArray) = vec(collect(Iterators.product(axes(c)...)))
+"""Create and return the residual container for an indexed source variable."""
+function _residual_container(variable)
+	first_var = first(variable)
+	m = first_var.model
+	residual_base = make_residual_name(base_name(first_var))
+	return haskey(m, Symbol(residual_base)) ?
+		m[Symbol(residual_base)] : copy_variable(residual_base, variable)
+end
+
+"""Pair one indexed expression container with its endogenous and residual variables."""
+function _block_equations(variable, sides)
+	keys = _all_keys(sides)
+	n = length(keys)
+	endos = Vector{VariableRef}(undef, n)
+	residual_vars = Vector{VariableRef}(undef, n)
+	equations = Vector{Equation}(undef, n)
+	iszero(n) && return endos, residual_vars, equations
+	residual = _residual_container(variable)
+	for (i, key) in enumerate(keys)
+		endo = _index_var(variable, key)
+		residual_var = _index_var(residual, key)
+		lhs, rhs = sides[key...]
+		endos[i] = endo
+		residual_vars[i] = residual_var
+		equations[i] = _equation_with_residual(endo, residual_var, lhs, rhs)
+	end
+	return endos, residual_vars, equations
+end
+
+"""Return index tuples from a JuMP container in iteration order."""
+_all_keys(c::AbstractArray) = Iterators.product(axes(c)...)
 _all_keys(c::SparseAxisArray) = keys(c.data)
 _all_keys(c::SparseZeroArray) = _all_keys(c.data)
 
 """Flatten nested tuples in a key.
 E.g. `((:a, :b), 1)` becomes `(:a, :b, 1)`."""
-_flatten_key(k::Tuple) = tuple(Iterators.flatten(map(x -> x isa Tuple ? x : (x,), k))...)
+_flatten_key(k::Tuple) = any(x -> x isa Tuple, k) ?
+	tuple(Iterators.flatten(map(x -> x isa Tuple ? x : (x,), k))...) : k
 
 """Index a variable with a constraint key, flattening only when the variable has more dimensions.
 Handles the difference between `x[a,b,t]` (3D) and `y[(a,b),t]` (2D with tuple index)."""
@@ -706,6 +736,7 @@ function _index_var(var, k::Tuple)
 	fk === k && return var[k...]
 	_ndims(var) == length(fk) ? var[fk...] : var[k...]
 end
+_index_var(var::SparseZeroArray, k::Tuple) = _index_var(var.data, k)
 
 """Return stored keys when a sparse mapped variable has the stated number of axes."""
 _mapped_sparse_constraint_keys(_, ::Val) = nothing
@@ -768,21 +799,45 @@ function _constraint_indices(ref_vars)
 	return names, last.(parsed), condition
 end
 
-"""Turn a fixed symbol label into the one-item index set that JuMP needs."""
-_constraint_axis_set(axis::QuoteNode) = axis.value isa Symbol ? Expr(:tuple, axis) : axis
-_constraint_axis_set(axis) = axis
-
 """Wrap an axis value so `in` treats a scalar as a one-item set."""
 _axis_collection(axis::AbstractString) = (axis,)
+_axis_collection(axis::Number) = (axis,)
 _axis_collection(axis::Symbol) = (axis,)
 _axis_collection(axis) = applicable(iterate, axis) ? axis : (axis,)
 
+function _constraint_axis_value(value)
+	isexpr(value, (:vect, :vcat, :hcat, :typed_vcat, :typed_hcat, :tuple, :comprehension)) &&
+		return value
+	isexpr(value, :call) && !isempty(value.args) && value.args[1] == :(:) && return value
+	return Expr(:call, GlobalRef(@__MODULE__, :_axis_collection), value)
+end
+
+"""Make scalar constraint axes explicit one-item sets before JuMP sees them."""
+function _constraint_axis_set(axis)
+	axis === Symbol(":") && return axis
+	if (isexpr(axis, :kw) || isexpr(axis, :(=))) && length(axis.args) == 2
+		return Expr(axis.head, axis.args[1], _constraint_axis_value(axis.args[2]))
+	elseif isexpr(axis, :call) && length(axis.args) == 3 && axis.args[1] in (:in, :∈)
+		return Expr(:call, axis.args[1], axis.args[2], _constraint_axis_value(axis.args[3]))
+	end
+	return _constraint_axis_value(axis)
+end
+
+function _constraint_index_sets(ref_vars)
+	args = Any[ref_vars.args[2:end]...]
+	if isexpr(ref_vars, :typed_vcat)
+		isempty(args) || (args[1] = _constraint_axis_set(args[1]))
+	else
+		for i in eachindex(args)
+			isexpr(args[i], :parameters) || (args[i] = _constraint_axis_set(args[i]))
+		end
+	end
+	return Expr(isexpr(ref_vars, :ref) ? :vect : :vcat, args...)
+end
+
 """Build the normal JuMP indices and an optional stored-key form for a mapped variable."""
 function _constraint_index_plan(ref_vars, stored_keys)
-	indices = Expr(
-		isexpr(ref_vars, :ref) ? :vect : :vcat,
-		_constraint_axis_set.(ref_vars.args[2:end])...,
-	)
+	indices = _constraint_index_sets(ref_vars)
 	parsed = _constraint_indices(ref_vars)
 	parsed === nothing && return indices, nothing, nothing
 
@@ -867,8 +922,7 @@ macro _block(container, ref_vars, constraint, extra...)
 	residual_for_ref = GlobalRef(sm, :_residual_for)
 	equation_ref = GlobalRef(sm, :Equation)
 	equation_with_residual_ref = GlobalRef(sm, :_equation_with_residual)
-	all_keys_ref = GlobalRef(sm, :_all_keys)
-	index_var_ref = GlobalRef(sm, :_index_var)
+	block_equations_ref = GlobalRef(sm, :_block_equations)
 	code = Expr(:block)
 	base_sym = _get_name(ref_vars)
 
@@ -889,21 +943,12 @@ macro _block(container, ref_vars, constraint, extra...)
 		end
 	elseif isexpr(ref_vars, :ref) || isexpr(ref_vars, :typed_vcat)
 		expr_code = _named_index_expression_code(
-			ref_vars, jump_expression, __source__, :_lhs => lhs, :_rhs => rhs,
+			ref_vars, jump_expression, __source__, :_sides => Expr(:tuple, lhs, rhs),
 		)
 		macrocall = quote
 			let _m = $model_expr
 				$expr_code
-				_ks = $all_keys_ref(_lhs)
-				endos = [$index_var_ref($base_sym, k) for k in _ks]
-				resids = [$residual_for_ref(endo) for endo in endos]
-				eqs = $equation_ref[$equation_with_residual_ref(
-					endo,
-					resid,
-					_lhs[k...],
-					_rhs[k...],
-				) for (k, endo, resid) in zip(_ks, endos, resids)]
-				(endos, resids, eqs)
+				$block_equations_ref($base_sym, _sides)
 			end
 		end
 	else
@@ -1071,7 +1116,7 @@ end
 ```
 
 ```julia
-# Unnamed sets follow JuMP syntax. A fixed symbol is short for a one-item set.
+# Unnamed sets follow JuMP syntax. A scalar is short for a one-item set.
 @variable(model, z[1:2, [:Equity, :Debt], 1:3])
 b = @block model begin
     z[s = 1:2, [:Equity], t = 1:3], z[s, :Equity, t] == s + t
@@ -1233,13 +1278,15 @@ macro block(model, expr)
 	end
 end
 
-"""Split full name JuMP variable into base name and indices"""
+"""Split a full JuMP variable name into its base name and indices."""
 function split_name(var::AbstractVariableRef)
-	parts = split(string(var), "["; limit=2)
-	if length(parts) == 1
-		return parts[1], ""  # Scalar variable, no indices
-	end
-	return parts[1], "[" * parts[2]
+	var_name = name(var)
+	full_name = isempty(var_name) ? string(var) : var_name
+	bracket = findfirst(==('['), full_name)
+	bracket === nothing && return full_name, ""
+	base = SubString(full_name, firstindex(full_name), prevind(full_name, bracket))
+	indices = SubString(full_name, bracket, lastindex(full_name))
+	return base, indices
 end
 
 """Return base name of JuMP variable"""

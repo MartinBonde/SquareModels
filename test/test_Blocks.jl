@@ -795,6 +795,15 @@ end
 		@test isempty(endogenous(empty))
 	end
 
+	@testset "Empty indexed block" begin
+		empty = @block m begin
+			y[i = 1:5; false], y[i] == 0
+		end
+		@test length(empty) == 0
+		@test isempty(endogenous(empty))
+		@test !haskey(m, :y_J)
+	end
+
 	@testset "Single equation" begin
 		single = @block m begin
 			x, x == 1
@@ -1453,6 +1462,18 @@ end
 		y[:Equity, periods], 0 == 0
 	end
 	@test Set(endogenous(no_named_axes)) == Set(y[:Equity, t] for t in periods)
+
+	@variable(m, annual[corporations, 2018:2020])
+	period = 2019
+	named_period = @test_nowarn @block m begin
+		annual[s = corporations, t = period], 0 == 0
+	end
+	unnamed_period = @test_nowarn @block m begin
+		annual[corporations, 2019], 0 == 0
+	end
+	expected_period = Set(annual[s, period] for s in corporations)
+	@test Set(endogenous(named_period)) == expected_period
+	@test Set(endogenous(unnamed_period)) == expected_period
 
 	@test_throws MethodError @block m begin
 		x[s = corporations, :, :Liab, t = periods], 0 == 0
