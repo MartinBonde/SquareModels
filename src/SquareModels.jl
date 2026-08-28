@@ -712,7 +712,7 @@ _mapped_sparse_constraint_keys(_, ::Val) = nothing
 _mapped_sparse_constraint_keys(var::SparseAxisArray{T,N}, ::Val{N}) where {T,N} = keys(var.data)
 _mapped_sparse_constraint_keys(var::SparseZeroArray{T,N}, ::Val{N}) where {T,N} = keys(var)
 
-"""Parse one scalar named index such as `i = I` or `i in I`."""
+"""Parse one named index such as `i = I` or `i in I`."""
 function _named_constraint_axis(axis)
 	if (isexpr(axis, :kw) || isexpr(axis, :(=))) && axis.args[1] isa Symbol
 		return axis.args[1], axis.args[2]
@@ -723,13 +723,25 @@ function _named_constraint_axis(axis)
 	return nothing
 end
 
+"""Give an unnamed JuMP index set an internal index name."""
+function _constraint_axis(axis)
+	axis === Symbol(":") && return nothing
+	parsed = _named_constraint_axis(axis)
+	parsed === nothing || return parsed
+	if isexpr(axis, :kw) || isexpr(axis, :(=)) ||
+	   (isexpr(axis, :call) && !isempty(axis.args) && axis.args[1] in (:in, :∈))
+		return nothing
+	end
+	return gensym(:index), axis
+end
+
 _constraint_expr_uses_symbol(symbol::Symbol, names) = symbol in names
 _constraint_expr_uses_symbol(expr::Expr, names) =
 	any(arg -> _constraint_expr_uses_symbol(arg, names), expr.args)
 _constraint_expr_uses_symbol(_, _) = false
 
-"""Return named axes and a semicolon filter, or `nothing` for other JuMP index forms."""
-function _named_constraint_indices(ref_vars)
+"""Return simple axes and a semicolon filter, or `nothing` for unsupported JuMP forms."""
+function _constraint_indices(ref_vars)
 	isexpr(ref_vars, :ref) || isexpr(ref_vars, :typed_vcat) || return nothing
 	axes = Any[ref_vars.args[2:end]...]
 	condition = nothing
@@ -749,22 +761,29 @@ function _named_constraint_indices(ref_vars)
 	end
 
 	isempty(axes) && return nothing
-	parsed = map(_named_constraint_axis, axes)
+	parsed = map(_constraint_axis, axes)
 	any(isnothing, parsed) && return nothing
 	names = first.(parsed)
 	allunique(names) || return nothing
 	return names, last.(parsed), condition
 end
 
-"""Wrap a named-axis value so `in` treats a scalar as a one-element set."""
+"""Turn a fixed symbol label into the one-item index set that JuMP needs."""
+_constraint_axis_set(axis::QuoteNode) = axis.value isa Symbol ? Expr(:tuple, axis) : axis
+_constraint_axis_set(axis) = axis
+
+"""Wrap an axis value so `in` treats a scalar as a one-item set."""
 _axis_collection(axis::AbstractString) = (axis,)
 _axis_collection(axis::Symbol) = (axis,)
 _axis_collection(axis) = applicable(iterate, axis) ? axis : (axis,)
 
 """Build the normal JuMP indices and an optional stored-key form for a mapped variable."""
 function _constraint_index_plan(ref_vars, stored_keys)
-	indices = Expr(isexpr(ref_vars, :ref) ? :vect : :vcat, ref_vars.args[2:end]...)
-	parsed = _named_constraint_indices(ref_vars)
+	indices = Expr(
+		isexpr(ref_vars, :ref) ? :vect : :vcat,
+		_constraint_axis_set.(ref_vars.args[2:end])...,
+	)
+	parsed = _constraint_indices(ref_vars)
 	parsed === nothing && return indices, nothing, nothing
 
 	names, values, condition = parsed
@@ -1048,6 +1067,15 @@ active = Set([(1, :a), (2, :a), (2, :b)])
 end
 b = @block model begin
     z_sparse[(i, j) in keys(z_sparse); i == 2], z_sparse[i, j] == i
+end
+```
+
+```julia
+# Unnamed sets follow JuMP syntax. A fixed symbol is short for a one-item set.
+@variable(model, z[1:2, [:Equity, :Debt], 1:3])
+b = @block model begin
+    z[s = 1:2, [:Equity], t = 1:3], z[s, :Equity, t] == s + t
+    z[s = 1:2, :Debt, t = 1:3], z[s, :Debt, t] == s + t
 end
 ```
 

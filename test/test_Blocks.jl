@@ -453,6 +453,28 @@ end
 	@test Set(endogenous(reuse_right)) == Set(endogenous(named))
 end
 
+@testset "@endo_exo_swap! accepts unnamed sets and fixed symbol labels" begin
+	m = Model()
+	JuMP.@variables m begin
+		u[1:2, [:a, :b]]
+		u_exo[1:2, [:a, :b]]
+	end
+	b = @block m begin
+		u[i = 1:2, j = [:a, :b]], u[i, j] + u_exo[i, j] == 1
+	end
+	expected = Set([u_exo[1, :a], u_exo[2, :a], u[1, :b], u[2, :b]])
+
+	fixed_labels = copy(b)
+	@endo_exo_swap!(fixed_labels, u_exo[i = 1:2, :a], u[i = 1:2, :a])
+	@test Set(endogenous(fixed_labels)) == expected
+
+	unnamed_sets = copy(b)
+	@endo_exo_swap! unnamed_sets begin
+		u_exo[i = 1:2, [:a]], u[i = 1:2, [:a]]
+	end
+	@test Set(endogenous(unnamed_sets)) == expected
+end
+
 @testset "@endo_exo_swap! error messages" begin
 	m = Model()
 	JuMP.@variables m begin
@@ -1400,6 +1422,93 @@ end
 	@test x isa DenseAxisArray
 	@test Set(endogenous(b)) == expected
 	@test Set(c.variable for c in test_constraints(b)) == expected
+end
+
+@testset "@block accepts unnamed sets and fixed symbol labels" begin
+	corporations = [:a, :b]
+	financial_assets = [:Equity, :Debt]
+	periods = 1:2
+	m = Model()
+	@variable(m, x[corporations, financial_assets, [:Liab, :Asset], periods])
+
+	b = @block m begin
+		x[s = corporations, :Equity, :Liab, t = periods], x[s, :Equity, :Liab, t] == t
+		@test_constraint("JuMP singleton sets")
+		x[s = corporations, [:Equity], [:Liab], t = periods], x[s, :Equity, :Liab, t] == t
+	end
+
+	expected = Set(x[s, :Equity, :Liab, t] for s in corporations, t in periods)
+	@test Set(endogenous(b)) == expected
+	@test Set(c.variable for c in test_constraints(b)) == expected
+
+	all_assets = @block m begin
+		x[s = corporations, financial_assets, :Asset, t = [1]], 0 == 0
+	end
+	@test Set(endogenous(all_assets)) == Set(
+		x[s, f, :Asset, 1] for s in corporations, f in financial_assets
+	)
+
+	@variable(m, y[financial_assets, periods])
+	no_named_axes = @block m begin
+		y[:Equity, periods], 0 == 0
+	end
+	@test Set(endogenous(no_named_axes)) == Set(y[:Equity, t] for t in periods)
+
+	@test_throws MethodError @block m begin
+		x[s = corporations, :, :Liab, t = periods], 0 == 0
+	end
+end
+
+@testset "@block filters sparse mixed indices to stored keys" begin
+	corporations = [:a, :b]
+	periods = 1:2
+	stored = Set([
+		(:a, :Equity, :Liab, 1),
+		(:a, :Equity, :Liab, 2),
+		(:b, :Equity, :Liab, 2),
+		(:b, :Debt, :Liab, 1),
+	])
+	expected = Set([
+		(:a, :Equity, :Liab, 1),
+		(:a, :Equity, :Liab, 2),
+		(:b, :Equity, :Liab, 2),
+	])
+
+	try
+		for sparse_zeros in (true, false)
+			use_sparse_zero_array!(sparse_zeros)
+			m = Model()
+			SquareModels.@variables m begin
+				x[s = corporations, f = [:Equity, :Debt], al = [:Liab], t = periods;
+				  (s, f, al, t) in stored]
+			end
+
+			block_visits = Tuple{Symbol,Int}[]
+			test_visits = Tuple{Symbol,Int}[]
+			block_rhs = (s, t) -> (push!(block_visits, (s, t)); t)
+			test_rhs = (s, t) -> (push!(test_visits, (s, t)); t)
+			b = @block m begin
+				x[s = corporations, :Equity, :Liab, t = periods; t == 2 || s == :a],
+				0 == block_rhs(s, t)
+				@test_constraint("Sparse unnamed singleton sets")
+				x[s = corporations, [:Equity], [:Liab], t = periods], 0 == test_rhs(s, t)
+			end
+
+			expected_visits = Set((s, t) for (s, _, _, t) in expected)
+			@test Set(block_visits) == expected_visits
+			@test Set(test_visits) == expected_visits
+			@test length(block_visits) == length(expected)
+			@test length(test_visits) == length(expected)
+			@test Set(endogenous(b)) == Set(x[key...] for key in expected)
+			@test Set(c.variable for c in test_constraints(b)) == Set(x[key...] for key in expected)
+			@test x isa (sparse_zeros ? SparseZeroArray : SparseAxisArray)
+			@test_throws MethodError @block m begin
+				x[s = corporations, :, :Liab, t = periods], 0 == 0
+			end
+		end
+	finally
+		use_sparse_zero_array!(true)
+	end
 end
 
 @testset "@block filters plain SparseAxisArray named indices" begin
