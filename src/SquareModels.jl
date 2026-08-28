@@ -41,6 +41,7 @@ using JuMP: AffExpr, QuadExpr, NonlinearExpr
 using JuMP.Containers: DenseAxisArray, SparseAxisArray
 using JuMP: @variable
 using JuMP: set_name, name, fix, is_fixed, unfix, all_variables, value, set_start_value
+using JuMP: object_dictionary, set_string_names_on_creation
 import MathOptInterface as MOI
 const _name_lookup_cache = WeakKeyDict{AbstractModel, Dict{String, VariableRef}}()
 
@@ -405,7 +406,20 @@ res = residuals(model)
 
 See also: [`residuals(::Block)`](@ref), [`RESIDUAL_SUFFIX`](@ref)
 """
-residuals(model::AbstractModel) = filter(v -> endswith(base_name(v), RESIDUAL_SUFFIX), all_variables(model))
+function residuals(model::AbstractModel)
+	VariableRef[
+		var
+		for (name, object) in object_dictionary(model)
+		if endswith(string(name), RESIDUAL_SUFFIX)
+		for var in _variable_refs(object)
+	]
+end
+
+_variable_refs(var::AbstractVariableRef) = (var,)
+_variable_refs(object::SparseZeroArray) = _variable_refs(object.data)
+_variable_refs(object::SparseAxisArray) = values(object.data)
+_variable_refs(object::AbstractArray) = object
+_variable_refs(_) = ()
 
 """
     Base.summary(io::IO, b::Block)
@@ -676,24 +690,66 @@ function _equation_with_residual(endo::VariableRef, resid::VariableRef, lhs, rhs
 	return Equation(found ? lhs - new_rhs : lhs - rhs - resid, MOI.EqualTo(0.0))
 end
 
+"""Return the model-dictionary name of an attached object, or `nothing`."""
+function _object_name(model, object)
+	for (name, value) in object_dictionary(model)
+		value === object && return name
+	end
+	if object isa SparseAxisArray
+		for (name, value) in object_dictionary(model)
+			value isa SparseZeroArray && value.data === object && return name
+		end
+	end
+	return nothing
+end
+
+_key_of(object::SparseZeroArray, var) = _key_of(object.data, var)
+function _key_of(object::SparseAxisArray, var)
+	for (key, item) in object.data
+		item === var && return key
+	end
+	return nothing
+end
+function _key_of(object::AbstractArray, var)
+	for key in _all_keys(object)
+		object[key...] === var && return key
+	end
+	return nothing
+end
+_key_of(_, _) = nothing
+
+"""Return `(name, container, key)` for a variable attached to `model`."""
+function _variable_location(model, var::VariableRef)
+	for (name, object) in object_dictionary(model)
+		endswith(string(name), RESIDUAL_SUFFIX) && continue
+		object === var && return name, object, nothing
+		key = _key_of(object, var)
+		key === nothing || return name, object, key
+	end
+	error("Cannot find residual for an unattached variable")
+end
+
 """Create the residual container for `endo` when needed and return its matching item."""
 function _residual_for(endo::VariableRef)
 	m = endo.model
-	base, indices = split_name(endo)
-	residual_base = make_residual_name(base)
-	haskey(m, Symbol(residual_base)) || copy_variable(residual_base, m[Symbol(base)])
-	resid = variable_by_name(m, residual_base * indices)
-	resid === nothing && error("Cannot find residual for $(name(endo))")
-	return resid
+	name, container, key = _variable_location(m, endo)
+	residual_name = Symbol(make_residual_name(name))
+	residuals = haskey(m, residual_name) ?
+		m[residual_name] : copy_variable(string(residual_name), container)
+	key === nothing && return residuals
+	return _index_var(residuals, key)
 end
 
 """Create and return the residual container for an indexed source variable."""
 function _residual_container(variable)
-	first_var = first(variable)
-	m = first_var.model
-	residual_base = make_residual_name(base_name(first_var))
-	return haskey(m, Symbol(residual_base)) ?
-		m[Symbol(residual_base)] : copy_variable(residual_base, variable)
+	m = first(variable).model
+	name = _object_name(m, variable)
+	if name === nothing
+		name, _, _ = _variable_location(m, first(variable))
+	end
+	residual_name = Symbol(make_residual_name(name))
+	return haskey(m, residual_name) ?
+		m[residual_name] : copy_variable(string(residual_name), variable)
 end
 
 """Pair one indexed expression container with its endogenous and residual variables."""
@@ -1050,10 +1106,356 @@ macro test_constraint(args...)
 	error("@test_constraint is valid only in an @block body")
 end
 
+const _BLOCK_LITERAL_SYMBOLS = Set((:_, :end, :nothing, :missing, :true, :false))
+
+function _push_block_capture!(captures, seen, symbol::Symbol, bound)
+	(symbol in bound || symbol in _BLOCK_LITERAL_SYMBOLS || Base.isoperator(symbol)) && return
+	symbol in seen && return
+	push!(captures, symbol)
+	push!(seen, symbol)
+	return
+end
+
+_push_block_capture!(captures, seen, ::LineNumberNode, bound) = nothing
+_push_block_capture!(captures, seen, ::QuoteNode, bound) = nothing
+_push_block_capture!(captures, seen, ::GlobalRef, bound) = nothing
+_push_block_capture!(captures, seen, value, bound) = nothing
+
+function _block_binding(expression)
+	if (isexpr(expression, :(=)) || isexpr(expression, :kw)) && length(expression.args) == 2
+		return expression.args[1], expression.args[2]
+	elseif isexpr(expression, :call) && length(expression.args) == 3 &&
+	       expression.args[1] in (:in, :∈)
+		return expression.args[2], expression.args[3]
+	end
+	return nothing
+end
+
+function _bind_block_pattern!(bound, pattern)
+	if pattern isa Symbol
+		push!(bound, pattern)
+	elseif isexpr(pattern, :tuple)
+		foreach(item -> _bind_block_pattern!(bound, item), pattern.args)
+	end
+	return
+end
+
+function _collect_generator_captures!(captures, seen, expression, bound)
+	local_bound = copy(bound)
+	for iterator in expression.args[2:end]
+		if isexpr(iterator, :filter) && !isempty(iterator.args)
+			binding = _block_binding(last(iterator.args))
+			if binding === nothing
+				_collect_block_captures!(captures, seen, last(iterator.args), local_bound)
+			else
+				pattern, values = binding
+				_collect_block_captures!(captures, seen, values, local_bound)
+				_bind_block_pattern!(local_bound, pattern)
+			end
+			for condition in iterator.args[1:end-1]
+				_collect_block_captures!(captures, seen, condition, local_bound)
+			end
+		else
+			binding = _block_binding(iterator)
+			if binding === nothing
+				_collect_block_captures!(captures, seen, iterator, local_bound)
+			else
+				pattern, values = binding
+				_collect_block_captures!(captures, seen, values, local_bound)
+				_bind_block_pattern!(local_bound, pattern)
+			end
+		end
+	end
+	_collect_block_captures!(captures, seen, first(expression.args), local_bound)
+	return
+end
+
+function _collect_block_captures!(captures, seen, expression::Expr, bound)
+	if isexpr(expression, :quote)
+		return
+	elseif isexpr(expression, :macrocall)
+		foreach(
+			argument -> _collect_block_captures!(captures, seen, argument, bound),
+			expression.args[3:end],
+		)
+		return
+	elseif isexpr(expression, :kw)
+		_collect_block_captures!(captures, seen, last(expression.args), bound)
+		return
+	elseif isexpr(expression, :.)
+		_collect_block_captures!(captures, seen, first(expression.args), bound)
+		length(expression.args) == 2 && !(last(expression.args) isa QuoteNode) &&
+			_collect_block_captures!(captures, seen, last(expression.args), bound)
+		return
+	elseif isexpr(expression, :generator)
+		_collect_generator_captures!(captures, seen, expression, bound)
+		return
+	elseif isexpr(expression, :->)
+		local_bound = copy(bound)
+		_bind_block_pattern!(local_bound, first(expression.args))
+		_collect_block_captures!(captures, seen, last(expression.args), local_bound)
+		return
+	end
+	for (index, argument) in enumerate(expression.args)
+		if isexpr(expression, :call) && index == 1 && argument isa Symbol &&
+		   Base.isoperator(argument)
+			continue
+		end
+		_collect_block_captures!(captures, seen, argument, bound)
+	end
+	return
+end
+
+function _collect_block_captures!(captures, seen, expression, bound)
+	expression isa Symbol && _push_block_capture!(captures, seen, expression, bound)
+	return
+end
+
+function _collect_block_reference_captures!(captures, seen, reference, bound)
+	if !(isexpr(reference, :ref) || isexpr(reference, :typed_vcat))
+		_collect_block_captures!(captures, seen, reference, bound)
+		return bound
+	end
+	local_bound = copy(bound)
+	_collect_block_captures!(captures, seen, first(reference.args), local_bound)
+	filters = Any[]
+	for axis in reference.args[2:end]
+		if isexpr(axis, :parameters)
+			append!(filters, axis.args)
+			continue
+		end
+		binding = _block_binding(axis)
+		if binding === nothing
+			_collect_block_captures!(captures, seen, axis, local_bound)
+		else
+			pattern, values = binding
+			_collect_block_captures!(captures, seen, values, local_bound)
+			_bind_block_pattern!(local_bound, pattern)
+		end
+	end
+	foreach(filter -> _collect_block_captures!(captures, seen, filter, local_bound), filters)
+	return local_bound
+end
+
+function _block_capture_symbols(model, expression)
+	captures = Symbol[]
+	seen = Set{Symbol}()
+	empty_bound = Set{Symbol}()
+	_collect_block_captures!(captures, seen, model, empty_bound)
+	last_bound = empty_bound
+	for item in expression.args
+		item isa LineNumberNode && continue
+		if isexpr(item, :tuple) && length(item.args) == 2
+			last_bound = _collect_block_reference_captures!(
+				captures, seen, first(item.args), empty_bound,
+			)
+			_collect_block_captures!(captures, seen, last(item.args), last_bound)
+		elseif isexpr(item, :macrocall)
+			for argument in item.args[3:end]
+				if isexpr(argument, :tuple) && length(argument.args) == 2
+					last_bound = _collect_block_reference_captures!(
+						captures, seen, first(argument.args), empty_bound,
+					)
+					_collect_block_captures!(captures, seen, last(argument.args), last_bound)
+				else
+					_collect_block_captures!(captures, seen, argument, empty_bound)
+				end
+			end
+		else
+			_collect_block_captures!(captures, seen, item, last_bound)
+		end
+	end
+	return Tuple(captures)
+end
+
+mutable struct _DeferredBlock
+	caller::Module
+	expression::Expr
+	arguments::Tuple{Vararg{Symbol}}
+	compiled::Union{Nothing,Function}
+	lock::ReentrantLock
+end
+
+_DeferredBlock(caller::Module, expression::Expr, arguments = ()) =
+	_DeferredBlock(caller, expression, arguments, nothing, ReentrantLock())
+
+function (builder::_DeferredBlock)(arguments...)
+	compiled = builder.compiled
+	if compiled === nothing
+		compiled = lock(builder.lock) do
+			if builder.compiled === nothing
+				lambda = Expr(:->, Expr(:tuple, builder.arguments...), builder.expression)
+				builder.compiled = Core.eval(builder.caller, lambda)
+			end
+			builder.compiled
+		end
+	end
+	return Base.invokelatest(compiled, arguments...)
+end
+
+const _DEFERRED_BLOCK_CACHE = IdDict{Module,Dict{Tuple{String,Int,UInt},_DeferredBlock}}()
+const _DEFERRED_BLOCK_CACHE_LOCK = ReentrantLock()
+
+function _run_deferred_block(caller, key, expression, argument_names, arguments)
+	builder = lock(_DEFERRED_BLOCK_CACHE_LOCK) do
+		module_cache = get!(_DEFERRED_BLOCK_CACHE, caller) do
+			Dict{Tuple{String,Int,UInt},_DeferredBlock}()
+		end
+		get!(module_cache, key) do
+			_DeferredBlock(caller, expression, argument_names)
+		end
+	end
+	return builder(arguments...)
+end
+
+function _block_error(line_number, item, message)
+	error(
+		"Invalid @block expression at $(line_number.file):$(line_number.line): " *
+		"$message. Got $(sprint(show, item)).",
+	)
+end
+
+_is_block_equality(item) =
+	isexpr(item, :call) && length(item.args) == 3 && item.args[1] == :(==)
+_is_block_test_relation(item) =
+	isexpr(item, :call) && length(item.args) == 3 &&
+	item.args[1] in (:(==), :(<=), :≤, :(>=), :≥)
+
+function _strip_block_leading_sign(item)
+	isexpr(item, :call) || return nothing
+	operator = item.args[1]
+	length(item.args) == 2 && operator in (:+, :-) && return (operator, item.args[2])
+	length(item.args) >= 3 && operator isa Symbol && Base.isoperator(operator) || return nothing
+	stripped = _strip_block_leading_sign(item.args[2])
+	stripped === nothing && return nothing
+	sign, first_term = stripped
+	return sign, Expr(:call, operator, first_term, item.args[3:end]...)
+end
+
+function _prepend_block_continuation(item, lhs)
+	isexpr(item, :call) || return nothing
+	if length(item.args) >= 3 && item.args[1] in (:+, :-)
+		first_term = _prepend_block_continuation(item.args[2], lhs)
+		first_term === nothing && return nothing
+		return Expr(:call, item.args[1], first_term, item.args[3:end]...)
+	end
+	stripped = _strip_block_leading_sign(item)
+	stripped === nothing && return nothing
+	sign, term = stripped
+	return Expr(:call, sign, lhs, term)
+end
+
+_block_macro_name(name::Symbol) = name
+_block_macro_name(name::Expr) =
+	name.head == :. && last(name.args) isa QuoteNode ? last(name.args).value : nothing
+_block_macro_name(name) = nothing
+_is_test_constraint_call(item) =
+	isexpr(item, :macrocall) && _block_macro_name(item.args[1]) == Symbol("@test_constraint")
+
+function _parse_block_expression(expression)
+	line_number = first(expression.args)
+	@assert line_number isa LineNumberNode
+	block_items = Tuple{LineNumberNode,Expr}[]
+	test_constraint_items = Tuple{LineNumberNode,Expr,Any,Any,Any}[]
+	last_tuple = nothing
+	pending_test_constraint = nothing
+	for item in expression.args
+		if item isa LineNumberNode
+			line_number = item
+		elseif isexpr(item, :tuple)
+			length(item.args) == 2 ||
+				_block_error(line_number, item, "Each line must be `variable, equation`")
+			if pending_test_constraint === nothing
+				_is_block_equality(item.args[2]) ||
+					_block_error(line_number, item, "The equation must use `==`")
+				push!(block_items, (line_number, item))
+			else
+				macro_line, _, message, atol, rtol = pending_test_constraint
+				_is_block_test_relation(item.args[2]) || _block_error(
+					line_number, item, "The test constraint must use `==`, `<=`, or `>=`",
+				)
+				push!(test_constraint_items, (macro_line, item, message, atol, rtol))
+				pending_test_constraint = nothing
+			end
+			last_tuple = item
+		elseif _is_test_constraint_call(item)
+			pending_test_constraint === nothing || _block_error(
+				line_number,
+				item,
+				"Each `@test_constraint` call must be followed by one `variable, equation` entry",
+			)
+			arguments = Any[item.args[3:end]...]
+			parameters = !isempty(arguments) && isexpr(first(arguments), :parameters) ?
+				popfirst!(arguments) : Expr(:parameters)
+			if length(arguments) in (1, 2) && isexpr(last(arguments), :tuple)
+				isempty(parameters.args) || _block_error(
+					line_number,
+					item,
+					"Put `@test_constraint(message; atol, rtol)` on its own line to use keywords",
+				)
+				message = length(arguments) == 2 ? first(arguments) : ""
+				tuple = last(arguments)
+				_is_block_test_relation(tuple.args[2]) || _block_error(
+					line_number, item, "The test constraint must use `==`, `<=`, or `>=`",
+				)
+				push!(test_constraint_items, (line_number, tuple, message, nothing, nothing))
+				last_tuple = tuple
+			else
+				length(arguments) in (0, 1) || _block_error(
+					line_number,
+					item,
+					"Put `@test_constraint([message]; atol, rtol)` on its own line before `variable, equation`",
+				)
+				message = isempty(arguments) ? "" : only(arguments)
+				options = Dict{Symbol,Any}(:atol => nothing, :rtol => nothing)
+				seen_options = Set{Symbol}()
+				for option in parameters.args
+					isexpr(option, :kw) && option.args[1] in keys(options) || _block_error(
+						line_number, item, "Test constraint keywords must be `atol` or `rtol`",
+					)
+					option.args[1] in seen_options && _block_error(
+						line_number,
+						item,
+						"Test constraint keyword `$(option.args[1])` occurs more than once",
+					)
+					push!(seen_options, option.args[1])
+					options[option.args[1]] = option.args[2]
+				end
+				pending_test_constraint =
+					(line_number, item, message, options[:atol], options[:rtol])
+				last_tuple = nothing
+			end
+		elseif last_tuple !== nothing
+			equation = last_tuple.args[2]
+			continuation = _prepend_block_continuation(item, equation.args[3])
+			continuation === nothing &&
+				_block_error(line_number, item, "Unexpected code in block body")
+			equation.args[3] = continuation
+		else
+			pending_test_constraint === nothing || _block_error(
+				line_number,
+				item,
+				"Each `@test_constraint` call must be followed by one `variable, equation` entry",
+			)
+			_block_error(line_number, item, "Unexpected code in block body")
+		end
+	end
+	pending_test_constraint === nothing || _block_error(
+		pending_test_constraint[1],
+		pending_test_constraint[2],
+		"Each `@test_constraint` call must be followed by one `variable, equation` entry",
+	)
+	return block_items, test_constraint_items
+end
+
 """
     @block model begin ... end
 
 Create a `Block` of equations mapped to their endogenous variables.
+
+SquareModels checks the block syntax when it loads the containing code. It
+expands and compiles the JuMP expression code when execution first reaches the
+`@block` call. Later calls at the same source location reuse that code.
 
 Each standard line in the block body specifies a variable (or indexed variable)
 followed by its defining equation. Equations are stored as lightweight `Equation`
@@ -1127,36 +1529,30 @@ end
 See also: [`Block`](@ref), [`@endo_exo_swap!`](@ref), [`endogenous`](@ref), [`variables`](@ref)
 """
 macro block(model, expr)
-	_error(line_number, it, msg) = error(
-		"Invalid @block expression at $(line_number.file):$(line_number.line): $msg. Got $(sprint(show, it)).",
+	_parse_block_expression(deepcopy(expr))
+	captures = _block_capture_symbols(model, expr)
+	eager_call = Expr(
+		:macrocall,
+		GlobalRef(@__MODULE__, Symbol("@_eager_block")),
+		__source__,
+		model,
+		expr,
 	)
-	_is_equality(it) = isexpr(it, :call) && length(it.args) == 3 && it.args[1] == :(==)
-	_is_test_relation(it) = isexpr(it, :call) && length(it.args) == 3 && it.args[1] in (:(==), :(<=), :≤, :(>=), :≥)
-	function _strip_leading_sign(it)
-		isexpr(it, :call) || return nothing
-		op = it.args[1]
-		length(it.args) == 2 && op in (:+, :-) && return (op, it.args[2])
-		length(it.args) >= 3 && op isa Symbol && Base.isoperator(op) || return nothing
-		stripped = _strip_leading_sign(it.args[2])
-		stripped === nothing && return nothing
-		sign, first_term = stripped
-		return sign, Expr(:call, op, first_term, it.args[3:end]...)
-	end
-	function _prepend_continuation(it, lhs)
-		isexpr(it, :call) || return nothing
-		if length(it.args) >= 3 && it.args[1] in (:+, :-)
-			first_term = _prepend_continuation(it.args[2], lhs)
-			first_term === nothing && return nothing
-			return Expr(:call, it.args[1], first_term, it.args[3:end]...)
-		end
-		stripped = _strip_leading_sign(it)
-		stripped === nothing && return nothing
-		sign, term = stripped
-		return Expr(:call, sign, lhs, term)
-	end
-	_macro_name(name::Symbol) = name
-	_macro_name(name::Expr) = name.head == :. && last(name.args) isa QuoteNode ? last(name.args).value : nothing
-	_is_test_constraint(it) = isexpr(it, :macrocall) && _macro_name(it.args[1]) == Symbol("@test_constraint")
+	file = __source__.file === nothing ? "none" : String(__source__.file)
+	key = (file, __source__.line, UInt(hash((model, expr, captures))))
+	values = Expr(:tuple, (esc(capture) for capture in captures)...)
+	runner = GlobalRef(@__MODULE__, :_run_deferred_block)
+	caller = QuoteNode(__module__)
+	return :($runner(
+		$caller,
+		$(QuoteNode(key)),
+		$(QuoteNode(eager_call)),
+		$(QuoteNode(captures)),
+		$values,
+	))
+end
+
+macro _eager_block(model, expr)
 	sm = @__MODULE__
 	block_macro_ref = GlobalRef(sm, Symbol("@_block"))
 	test_constraint_macro_ref = GlobalRef(sm, Symbol("@_test_constraint"))
@@ -1165,70 +1561,7 @@ macro block(model, expr)
 	test_constraint_ref = GlobalRef(sm, :TestConstraint)
 	collect_variables_ref = GlobalRef(sm, :collect_variables!)
 	residuals_ref = GlobalRef(sm, :residuals)
-	line_number = expr.args[1]
-	@assert isa(line_number, LineNumberNode)
-	block_items = Tuple{LineNumberNode,Expr}[]
-	test_constraint_items = Tuple{LineNumberNode,Expr,Any,Any,Any}[]
-	last_tuple = nothing
-	pending_test_constraint = nothing
-	for it in expr.args
-	    if isa(it, LineNumberNode)
-	        line_number = it
-	    elseif isexpr(it, :tuple) # line with commas
-	        length(it.args) == 2 || _error(line_number, it, "Each line must be `variable, equation`")
-	        if pending_test_constraint === nothing
-	            _is_equality(it.args[2]) || _error(line_number, it, "The equation must use `==`")
-	            push!(block_items, (line_number, it))
-	        else
-	            macro_line, _, message, atol, rtol = pending_test_constraint
-	            _is_test_relation(it.args[2]) || _error(line_number, it, "The test constraint must use `==`, `<=`, or `>=`")
-	            push!(test_constraint_items, (macro_line, it, message, atol, rtol))
-	            pending_test_constraint = nothing
-	        end
-	        last_tuple = it
-	    elseif _is_test_constraint(it)
-	        pending_test_constraint === nothing ||
-	            _error(line_number, it, "Each `@test_constraint` call must be followed by one `variable, equation` entry")
-	        args = Any[it.args[3:end]...]
-	        parameters = !isempty(args) && isexpr(first(args), :parameters) ? popfirst!(args) : Expr(:parameters)
-	        if length(args) in (1, 2) && isexpr(last(args), :tuple)
-	            isempty(parameters.args) ||
-	                _error(line_number, it, "Put `@test_constraint(message; atol, rtol)` on its own line to use keywords")
-	            message = length(args) == 2 ? first(args) : ""
-	            tuple = last(args)
-	            _is_test_relation(tuple.args[2]) || _error(line_number, it, "The test constraint must use `==`, `<=`, or `>=`")
-	            push!(test_constraint_items, (line_number, tuple, message, nothing, nothing))
-	            last_tuple = tuple
-	        else
-	            length(args) in (0, 1) ||
-	                _error(line_number, it, "Put `@test_constraint([message]; atol, rtol)` on its own line before `variable, equation`")
-	            message = isempty(args) ? "" : only(args)
-	            options = Dict{Symbol,Any}(:atol => nothing, :rtol => nothing)
-	            seen_options = Set{Symbol}()
-	            for option in parameters.args
-	                isexpr(option, :kw) && option.args[1] in keys(options) ||
-	                    _error(line_number, it, "Test constraint keywords must be `atol` or `rtol`")
-	                option.args[1] in seen_options &&
-	                    _error(line_number, it, "Test constraint keyword `$(option.args[1])` occurs more than once")
-	                push!(seen_options, option.args[1])
-	                options[option.args[1]] = option.args[2]
-	            end
-	            pending_test_constraint = (line_number, it, message, options[:atol], options[:rtol])
-	            last_tuple = nothing
-	        end
-	    elseif last_tuple !== nothing
-	        eq = last_tuple.args[2]
-	        continuation = _prepend_continuation(it, eq.args[3])
-	        continuation === nothing && _error(line_number, it, "Unexpected code in block body")
-	        eq.args[3] = continuation
-	    else
-	        pending_test_constraint === nothing ||
-	            _error(line_number, it, "Each `@test_constraint` call must be followed by one `variable, equation` entry")
-	        _error(line_number, it, "Unexpected code in block body")
-	    end
-	end
-	pending_test_constraint === nothing ||
-	    _error(pending_test_constraint[1], pending_test_constraint[2], "Each `@test_constraint` call must be followed by one `variable, equation` entry")
+	block_items, test_constraint_items = _parse_block_expression(expr)
 	code = Expr(:tuple)
 	for (line_number, it) in block_items
 	    macro_call = Expr(
@@ -1278,6 +1611,10 @@ macro block(model, expr)
 	end
 end
 
+precompile(_parse_block_expression, (Expr,))
+precompile(_block_capture_symbols, (Symbol, Expr))
+precompile(var"@block", (LineNumberNode, Module, Symbol, Expr))
+
 """Split a full JuMP variable name into its base name and indices."""
 function split_name(var::AbstractVariableRef)
 	var_name = name(var)
@@ -1299,12 +1636,31 @@ base_name(var::AbstractArray{T}) where {T<:AbstractVariableRef} = base_name(firs
 Return the residual variable or residual container corresponding to an endogenous
 variable or variable container.
 """
-residual(var) = first(var).model[Symbol(make_residual_name(base_name(var)))]
-residual(var::AbstractVariableRef) = var.model[Symbol(make_residual_name(base_name(var)))]
+function residual(var)
+	m = first(var).model
+	name = _object_name(m, var)
+	if name === nothing
+		name, _, _ = _variable_location(m, first(var))
+	end
+	return m[Symbol(make_residual_name(name))]
+end
+function residual(var::AbstractVariableRef)
+	m = var.model
+	name, _, _ = _variable_location(m, var)
+	return m[Symbol(make_residual_name(name))]
+end
 
 """
 If a variable Symbol(new_name) does not exist, define a new variable with the same indices as an existing variable.
 """
+function _copy_index_name!(dest, source, new_name, model)
+	set_string_names_on_creation(model) || return
+	source_name = name(source)
+	isempty(source_name) && return
+	set_name(dest, new_name * split_name(source)[2])
+	return
+end
+
 function copy_variable(new_name::String, original::SparseAxisArray)
 	m = first(original).model
 	sym = Symbol(new_name)
@@ -1312,7 +1668,7 @@ function copy_variable(new_name::String, original::SparseAxisArray)
 	    d = Dict(k => VariableRef(m) for k in keys(original.data))
 	    new = SparseAxisArray(d)
 	    for k in keys(original.data)
-	        set_name(new[k...], new_name * split_name(original[k...])[2])
+	        _copy_index_name!(new[k...], original[k...], new_name, m)
 	    end
 	    m[sym] = new
 	    fix.(new, 0)
@@ -1326,7 +1682,7 @@ function copy_variable(new_name::String, original::AbstractArray)
 	    data = reshape([VariableRef(m) for _ in _all_keys(original)], length.(axes(original))...)
 	    new = DenseAxisArray(data, axes(original)...)
 	    for (x, y) in zip(new, original)
-	        set_name(x, new_name * split_name(y)[2])
+	        _copy_index_name!(x, y, new_name, m)
 	    end
 	    m[sym] = new
 	    fix.(new, 0)
@@ -1338,7 +1694,7 @@ function copy_variable(new_name::String, original::AbstractVariableRef)
 	sym = Symbol(new_name)
 	if !haskey(m, sym)
 	    new = VariableRef(m)
-	    set_name(new, new_name)
+	    set_string_names_on_creation(m) && set_name(new, new_name)
 	    m[sym] = new
 	    fix(new, 0)
 	end
@@ -1393,6 +1749,13 @@ end
 include("endo_exo_swap.jl")
 include("tagged_variables.jl")
 include("ModelDictionaries.jl")
+
+description(dictionary::ModelDictionary, var::Symbol) = description(dictionary.model, var)
+tags(dictionary::ModelDictionary, var::Symbol) = tags(dictionary.model, var)
+has_tag(dictionary::ModelDictionary, var::Symbol, tag::Tag) = has_tag(dictionary.model, var, tag)
+tagged(dictionary::ModelDictionary, tag::Tag) = tagged(dictionary.model, tag)
+metadata(dictionary::ModelDictionary, var::Symbol) = metadata(dictionary.model, var)
+
 include("solve.jl")
 include("ModelExpressions.jl")
 include("ModelPlotting.jl")

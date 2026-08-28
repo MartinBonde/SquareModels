@@ -331,8 +331,8 @@ end
     @test sparse[:a, :y, 2020] isa SquareModels.Zero
     @test_throws ErrorException sparse[:d, :x, 2020]
     @test m[:sparse] === sparse
-    @test description(:sparse) == "Sparse variable"
-    @test sparse_tag in tags(:sparse)
+    @test description(m, :sparse) == "Sparse variable"
+    @test sparse_tag in tags(m, :sparse)
 
     data = ModelDictionary(m)
     data[sparse] .= 1.0
@@ -458,7 +458,7 @@ end
     @test x[:a] isa VariableRef
     @test x[:c] isa SquareModels.Zero
     @test_throws ErrorException x[:d]
-    @test sparse_tag in tags(:x)
+    @test sparse_tag in tags(m, :x)
 
     @test y isa SparseZeroArray
     @test y[1] isa VariableRef
