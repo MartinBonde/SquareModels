@@ -73,50 +73,74 @@ VariableMetadata() = VariableMetadata(Set{Tag}(), "")
 VariableMetadata(tags) = VariableMetadata(Set{Tag}(tags), "")
 VariableMetadata(tags, desc::AbstractString) = VariableMetadata(Set{Tag}(tags), String(desc))
 
-# Global registry: variable name (Symbol) => VariableMetadata
-const _variable_metadata = Dict{Symbol, VariableMetadata}()
+const _VARIABLE_METADATA_EXT_KEY = :SquareModels_variable_metadata
+
+function _model_variable_metadata(model::AbstractModel)
+    return get!(model.ext, _VARIABLE_METADATA_EXT_KEY) do
+        Dict{Symbol, VariableMetadata}()
+    end
+end
+
+function _registered_metadata(model::AbstractModel, var::Symbol)
+    registry = get(model.ext, _VARIABLE_METADATA_EXT_KEY, nothing)
+    registry === nothing && return VariableMetadata()
+    return get(registry, var, VariableMetadata())
+end
+
+function _register_variable_metadata!(model::AbstractModel, var::Symbol, value::VariableMetadata)
+    _model_variable_metadata(model)[var] = value
+    return value
+end
 
 """
-    description(var) → String
+    description(var::AbstractVariableRef) → String
+    description(model, var::Symbol) → String
 
 Get the description of a variable. For indexed variables like `X[2020]`,
 returns the description of the base variable `X`.
 """
-description(var::AbstractVariableRef) = get(_variable_metadata, Symbol(base_name(var)), VariableMetadata()).description
-description(var::Symbol) = get(_variable_metadata, var, VariableMetadata()).description
+description(model::AbstractModel, var::Symbol) = metadata(model, var).description
+description(var::AbstractVariableRef) = metadata(var).description
 
 """
-    tags(var) → Set{Tag}
+    tags(var::AbstractVariableRef) → Set{Tag}
+    tags(model, var::Symbol) → Set{Tag}
 
 Get all tags associated with a variable. For indexed variables like `X[2020]`,
 returns the tags of the base variable `X`.
 """
-tags(var::AbstractVariableRef) = get(_variable_metadata, Symbol(base_name(var)), VariableMetadata()).tags
-tags(var::Symbol) = get(_variable_metadata, var, VariableMetadata()).tags
+tags(model::AbstractModel, var::Symbol) = metadata(model, var).tags
+tags(var::AbstractVariableRef) = metadata(var).tags
 
 """
-    has_tag(var, tag::Tag) → Bool
+    has_tag(var::AbstractVariableRef, tag::Tag) → Bool
+    has_tag(model, var::Symbol, tag::Tag) → Bool
 
 Check if a variable has a specific tag.
 """
+has_tag(model::AbstractModel, var::Symbol, tag::Tag) = tag ∈ tags(model, var)
 has_tag(var::AbstractVariableRef, tag::Tag) = tag ∈ tags(var)
-has_tag(var::Symbol, tag::Tag) = tag ∈ tags(var)
 
 """
-    tagged(tag::Tag) → Vector{Symbol}
+    tagged(model, tag::Tag) → Vector{Symbol}
 
 Get all variable base names that have a specific tag.
 """
-tagged(tag::Tag) = [k for (k, m) in _variable_metadata if tag ∈ m.tags]
+function tagged(model::AbstractModel, tag::Tag)
+    registry = get(model.ext, _VARIABLE_METADATA_EXT_KEY, nothing)
+    registry === nothing && return Symbol[]
+    return [k for (k, m) in registry if tag ∈ m.tags]
+end
 
 """
-    metadata(var) → VariableMetadata
+    metadata(var::AbstractVariableRef) → VariableMetadata
+    metadata(model, var::Symbol) → VariableMetadata
 
 Get full metadata for a variable. For indexed variables like `X[2020]`,
 returns the metadata of the base variable `X`.
 """
-metadata(var::AbstractVariableRef) = get(_variable_metadata, Symbol(base_name(var)), VariableMetadata())
-metadata(var::Symbol) = get(_variable_metadata, var, VariableMetadata())
+metadata(model::AbstractModel, var::Symbol) = _registered_metadata(model, var)
+metadata(var::AbstractVariableRef) = metadata(JuMP.owner_model(var), Symbol(base_name(var)))
 
 # ==============================================================================
 # Parsing Helpers
@@ -492,10 +516,10 @@ end
 
 # Access metadata
 ```julia
-description(:vGDP)  # "Nominal GDP"
-tags(:vGDP)         # Set([GrowthAdjusted, InflationAdjusted])
-has_tag(:vGDP, GrowthAdjusted)  # true
-tagged(GrowthAdjusted)  # [:vGDP, :qGDP, ...]
+description(model, :vGDP)  # "Nominal GDP"
+tags(model, :vGDP)         # Set([GrowthAdjusted, InflationAdjusted])
+has_tag(model, :vGDP, GrowthAdjusted)  # true
+tagged(model, GrowthAdjusted)  # [:vGDP, :qGDP, ...]
 ```
 
 A semicolon `in` filter walks the membership set, not the Cartesian product of
@@ -539,8 +563,8 @@ macro variables(container_expr, block)
     sparse_zero_array = GlobalRef(sm, :SparseZeroArray)
     sparse_axis_array = GlobalRef(sm, :SparseAxisArray)
     use_sparse_zero_array = GlobalRef(sm, :_use_sparse_zero_array)
-    variable_metadata = GlobalRef(sm, :_variable_metadata)
     variable_metadata_type = GlobalRef(sm, :VariableMetadata)
+    register_variable_metadata = GlobalRef(sm, :_register_variable_metadata!)
     build_destructured_variable = GlobalRef(sm, :_build_destructured_variable)
     build_membership_variable = GlobalRef(sm, :_build_membership_variable)
 
@@ -624,13 +648,19 @@ macro variables(container_expr, block)
         if !isempty(all_tag_exprs) || !isempty(desc)
             tags_tuple = Expr(:tuple, all_tag_exprs...)
             push!(code.args, :(
-                ($variable_metadata)[$(QuoteNode(var_name))] =
-                    $variable_metadata_type([$tags_tuple...], $desc)
+                $register_variable_metadata(
+                    $model_expr,
+                    $(QuoteNode(var_name)),
+                    $variable_metadata_type([$tags_tuple...], $desc),
+                )
             ))
         else
             push!(code.args, :(
-                ($variable_metadata)[$(QuoteNode(var_name))] =
-                    $variable_metadata_type()
+                $register_variable_metadata(
+                    $model_expr,
+                    $(QuoteNode(var_name)),
+                    $variable_metadata_type(),
+                )
             ))
         end
     end

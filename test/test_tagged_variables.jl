@@ -114,16 +114,16 @@ end
             v4[t]
         end
  
-        @test tag_a ∈ tags(:v1)
-        @test tag_b ∉ tags(:v1)
+        @test tag_a ∈ tags(model, :v1)
+        @test tag_b ∉ tags(model, :v1)
 
-        @test tag_a ∈ tags(:v2)
-        @test tag_b ∈ tags(:v2)
+        @test tag_a ∈ tags(model, :v2)
+        @test tag_b ∈ tags(model, :v2)
 
-        @test tag_a ∉ tags(:v3)
-        @test tag_b ∈ tags(:v3)
+        @test tag_a ∉ tags(model, :v3)
+        @test tag_b ∈ tags(model, :v3)
 
-        @test isempty(tags(:v4))
+        @test isempty(tags(model, :v4))
     end
 
     @testset "Variables with descriptions" begin
@@ -135,8 +135,8 @@ end
             vNoDesc[t]
         end
 
-        @test description(:vDesc) == "A variable with description"
-        @test description(:vNoDesc) == ""
+        @test description(model, :vDesc) == "A variable with description"
+        @test description(model, :vNoDesc) == ""
         
         # Test that indexed variable refs also work (lookup by base name)
         @test description(vDesc[2020]) == "A variable with description"
@@ -156,23 +156,20 @@ end
             qGDP[t] :: growth, "Real GDP"
         end
 
-        @test description(:vGDP) == "Gross Domestic Product"
-        @test growth ∈ tags(:vGDP)
-        @test inflation ∈ tags(:vGDP)
+        @test description(model, :vGDP) == "Gross Domestic Product"
+        @test growth ∈ tags(model, :vGDP)
+        @test inflation ∈ tags(model, :vGDP)
 
-        @test description(:pGDP) == "GDP deflator"
-        @test growth ∉ tags(:pGDP)
-        @test inflation ∈ tags(:pGDP)
+        @test description(model, :pGDP) == "GDP deflator"
+        @test growth ∉ tags(model, :pGDP)
+        @test inflation ∈ tags(model, :pGDP)
 
-        @test description(:qGDP) == "Real GDP"
-        @test growth ∈ tags(:qGDP)
-        @test inflation ∉ tags(:qGDP)
+        @test description(model, :qGDP) == "Real GDP"
+        @test growth ∈ tags(model, :qGDP)
+        @test inflation ∉ tags(model, :qGDP)
     end
 
     @testset "Query functions" begin
-        # Clear registry for clean test
-        empty!(SquareModels._variable_metadata)
-
         model = Model()
         t = 2020:2022
 
@@ -187,26 +184,60 @@ end
         end
 
         # has_tag
-        @test has_tag(:a, tag_x)
-        @test !has_tag(:a, tag_y)
-        @test has_tag(:b, tag_x)
-        @test has_tag(:b, tag_y)
+        @test has_tag(model, :a, tag_x)
+        @test !has_tag(model, :a, tag_y)
+        @test has_tag(model, :b, tag_x)
+        @test has_tag(model, :b, tag_y)
 
         # tagged
-        with_x = tagged(tag_x)
+        with_x = tagged(model, tag_x)
         @test :a ∈ with_x
         @test :b ∈ with_x
         @test :c ∉ with_x
 
-        with_y = tagged(tag_y)
+        with_y = tagged(model, tag_y)
         @test :a ∉ with_y
         @test :b ∈ with_y
         @test :c ∈ with_y
 
         # metadata
-        m = metadata(:a)
+        m = metadata(model, :a)
         @test m.description == "Variable A"
         @test tag_x ∈ m.tags
+    end
+
+    @testset "Model-owned metadata" begin
+        first_model = Model()
+        second_model = Model()
+        first_tag = Tag(:first_model)
+        second_tag = Tag(:second_model)
+
+        @variables first_model begin
+            shared_name :: first_tag, "First model"
+        end
+        @variables second_model begin
+            shared_name :: second_tag, "Second model"
+        end
+
+        @test metadata(first_model, :shared_name).description == "First model"
+        @test metadata(second_model, :shared_name).description == "Second model"
+        @test has_tag(first_model[:shared_name], first_tag)
+        @test !has_tag(first_model[:shared_name], second_tag)
+        @test :shared_name in tagged(first_model, first_tag)
+        @test :shared_name ∉ tagged(first_model, second_tag)
+
+        dictionary = ModelDictionary(first_model)
+        @test description(dictionary, :shared_name) == "First model"
+        @test tags(dictionary, :shared_name) == Set([first_tag])
+        @test has_tag(dictionary, :shared_name, first_tag)
+        @test tagged(dictionary, first_tag) == [:shared_name]
+        @test metadata(dictionary, :shared_name) == metadata(first_model, :shared_name)
+
+        @test !applicable(description, :shared_name)
+        @test !applicable(tags, :shared_name)
+        @test !applicable(has_tag, :shared_name, first_tag)
+        @test !applicable(tagged, first_tag)
+        @test !applicable(metadata, :shared_name)
     end
 
     @testset "Scalar variables" begin
@@ -224,10 +255,10 @@ end
         @test haskey(model, :ρ)
         @test haskey(model, :δ)
 
-        @test scalar_tag ∈ tags(:σ)
-        @test description(:σ) == "Substitution elasticity"
-        @test description(:ρ) == "Discount rate"
-        @test description(:δ) == ""
+        @test scalar_tag ∈ tags(model, :σ)
+        @test description(model, :σ) == "Substitution elasticity"
+        @test description(model, :ρ) == "Discount rate"
+        @test description(model, :δ) == ""
     end
 
     @testset "ModelDictionary integration" begin
@@ -241,8 +272,8 @@ end
         end
 
         @test haskey(db.model, :v)
-        @test md_tag ∈ tags(:v)
-        @test description(:v) == "Test variable"
+        @test md_tag ∈ tags(db, :v)
+        @test description(db, :v) == "Test variable"
     end
 
     @testset "JuMP.@variables still accessible" begin
@@ -256,8 +287,8 @@ end
 
         @test haskey(model, :jump_var)
         # But it won't have our metadata
-        @test description(:jump_var) == ""
-        @test isempty(tags(:jump_var))
+        @test description(model, :jump_var) == ""
+        @test isempty(tags(model, :jump_var))
     end
 
     @testset "Block-level tags" begin
@@ -274,14 +305,14 @@ end
         end
 
         # w1 should have block_tag only
-        @test block_tag ∈ tags(:w1)
-        @test var_tag ∉ tags(:w1)
-        @test description(:w1) == "Variable with block tag only"
+        @test block_tag ∈ tags(model, :w1)
+        @test var_tag ∉ tags(model, :w1)
+        @test description(model, :w1) == "Variable with block tag only"
 
         # w2 should have both tags
-        @test block_tag ∈ tags(:w2)
-        @test var_tag ∈ tags(:w2)
-        @test description(:w2) == "Variable with both tags"
+        @test block_tag ∈ tags(model, :w2)
+        @test var_tag ∈ tags(model, :w2)
+        @test description(model, :w2) == "Variable with both tags"
     end
 
     @testset "Block-level multiple tags" begin
@@ -299,20 +330,17 @@ end
         end
 
         # z1 should have both block tags
-        @test tag1 ∈ tags(:z1)
-        @test tag2 ∈ tags(:z1)
-        @test tag3 ∉ tags(:z1)
+        @test tag1 ∈ tags(model, :z1)
+        @test tag2 ∈ tags(model, :z1)
+        @test tag3 ∉ tags(model, :z1)
 
         # z2 should have all three tags
-        @test tag1 ∈ tags(:z2)
-        @test tag2 ∈ tags(:z2)
-        @test tag3 ∈ tags(:z2)
+        @test tag1 ∈ tags(model, :z2)
+        @test tag2 ∈ tags(model, :z2)
+        @test tag3 ∈ tags(model, :z2)
     end
 
-    @testset "Variable redefinition" begin
-        # Clear registry for clean test
-        empty!(SquareModels._variable_metadata)
-
+    @testset "Same name in separate models" begin
         model = Model()
         t = 2020:2022
 
@@ -324,9 +352,9 @@ end
             redef_var[t] :: old_tag, "Old description"
         end
 
-        @test old_tag ∈ tags(:redef_var)
-        @test new_tag ∉ tags(:redef_var)
-        @test description(:redef_var) == "Old description"
+        @test old_tag ∈ tags(model, :redef_var)
+        @test new_tag ∉ tags(model, :redef_var)
+        @test description(model, :redef_var) == "Old description"
 
         # Redefine variable with new tags and description (new model to avoid JuMP error)
         model2 = Model()
@@ -334,9 +362,12 @@ end
             redef_var[t] :: new_tag, "New description"
         end
 
-        # Metadata should be updated to new values
-        @test old_tag ∉ tags(:redef_var)
-        @test new_tag ∈ tags(:redef_var)
-        @test description(:redef_var) == "New description"
+        @test old_tag ∈ tags(model, :redef_var)
+        @test new_tag ∉ tags(model, :redef_var)
+        @test description(model, :redef_var) == "Old description"
+
+        @test old_tag ∉ tags(model2, :redef_var)
+        @test new_tag ∈ tags(model2, :redef_var)
+        @test description(model2, :redef_var) == "New description"
     end
 end

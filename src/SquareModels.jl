@@ -1749,6 +1749,13 @@ end
 include("endo_exo_swap.jl")
 include("tagged_variables.jl")
 include("ModelDictionaries.jl")
+
+description(dictionary::ModelDictionary, var::Symbol) = description(dictionary.model, var)
+tags(dictionary::ModelDictionary, var::Symbol) = tags(dictionary.model, var)
+has_tag(dictionary::ModelDictionary, var::Symbol, tag::Tag) = has_tag(dictionary.model, var, tag)
+tagged(dictionary::ModelDictionary, tag::Tag) = tagged(dictionary.model, tag)
+metadata(dictionary::ModelDictionary, var::Symbol) = metadata(dictionary.model, var)
+
 include("solve.jl")
 include("ModelExpressions.jl")
 include("ModelPlotting.jl")
