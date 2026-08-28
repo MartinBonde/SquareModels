@@ -28,7 +28,7 @@ explicit tuple-key form, such as
 `x[(i, j, t) in keys(x); t > t₀]`, also stays valid.
 
 Axes without a name follow JuMP set syntax. Use a one-item set when the equation
-does not need the index name. A quoted symbol also selects one fixed label:
+does not need the index name. A scalar also selects one fixed label:
 
 ```julia
 block = @block data begin
@@ -37,10 +37,11 @@ block = @block data begin
 end
 ```
 
-Here, `:Liab` means the same as `[:Liab]`. This short form applies only to a
-quoted symbol. A bare name, such as `financial_assets`, remains a JuMP index set.
-For sparse mapped variables, SquareModels checks named sets, unnamed sets, fixed
-labels, and the filter against the stored keys.
+Here, `:Liab` means the same as `[:Liab]`. A number works in the same way, so
+`t=2019` means `t=[2019]` and does not cause JuMP's one-item axis warning. A bare
+name, such as `financial_assets`, remains a JuMP index set when its value is a
+set. For sparse mapped variables, SquareModels checks named sets, unnamed sets,
+fixed labels, and the filter against the stored keys.
 
 Blocks can be combined with `+` as long as they belong to the same JuMP model and
 do not determine the same endogenous variable twice:

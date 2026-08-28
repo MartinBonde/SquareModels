@@ -768,21 +768,45 @@ function _constraint_indices(ref_vars)
 	return names, last.(parsed), condition
 end
 
-"""Turn a fixed symbol label into the one-item index set that JuMP needs."""
-_constraint_axis_set(axis::QuoteNode) = axis.value isa Symbol ? Expr(:tuple, axis) : axis
-_constraint_axis_set(axis) = axis
-
 """Wrap an axis value so `in` treats a scalar as a one-item set."""
 _axis_collection(axis::AbstractString) = (axis,)
+_axis_collection(axis::Number) = (axis,)
 _axis_collection(axis::Symbol) = (axis,)
 _axis_collection(axis) = applicable(iterate, axis) ? axis : (axis,)
 
+function _constraint_axis_value(value)
+	isexpr(value, (:vect, :vcat, :hcat, :typed_vcat, :typed_hcat, :tuple, :comprehension)) &&
+		return value
+	isexpr(value, :call) && !isempty(value.args) && value.args[1] == :(:) && return value
+	return Expr(:call, GlobalRef(@__MODULE__, :_axis_collection), value)
+end
+
+"""Make scalar constraint axes explicit one-item sets before JuMP sees them."""
+function _constraint_axis_set(axis)
+	axis === Symbol(":") && return axis
+	if (isexpr(axis, :kw) || isexpr(axis, :(=))) && length(axis.args) == 2
+		return Expr(axis.head, axis.args[1], _constraint_axis_value(axis.args[2]))
+	elseif isexpr(axis, :call) && length(axis.args) == 3 && axis.args[1] in (:in, :∈)
+		return Expr(:call, axis.args[1], axis.args[2], _constraint_axis_value(axis.args[3]))
+	end
+	return _constraint_axis_value(axis)
+end
+
+function _constraint_index_sets(ref_vars)
+	args = Any[ref_vars.args[2:end]...]
+	if isexpr(ref_vars, :typed_vcat)
+		isempty(args) || (args[1] = _constraint_axis_set(args[1]))
+	else
+		for i in eachindex(args)
+			isexpr(args[i], :parameters) || (args[i] = _constraint_axis_set(args[i]))
+		end
+	end
+	return Expr(isexpr(ref_vars, :ref) ? :vect : :vcat, args...)
+end
+
 """Build the normal JuMP indices and an optional stored-key form for a mapped variable."""
 function _constraint_index_plan(ref_vars, stored_keys)
-	indices = Expr(
-		isexpr(ref_vars, :ref) ? :vect : :vcat,
-		_constraint_axis_set.(ref_vars.args[2:end])...,
-	)
+	indices = _constraint_index_sets(ref_vars)
 	parsed = _constraint_indices(ref_vars)
 	parsed === nothing && return indices, nothing, nothing
 
@@ -1071,7 +1095,7 @@ end
 ```
 
 ```julia
-# Unnamed sets follow JuMP syntax. A fixed symbol is short for a one-item set.
+# Unnamed sets follow JuMP syntax. A scalar is short for a one-item set.
 @variable(model, z[1:2, [:Equity, :Debt], 1:3])
 b = @block model begin
     z[s = 1:2, [:Equity], t = 1:3], z[s, :Equity, t] == s + t
