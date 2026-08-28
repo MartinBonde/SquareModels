@@ -41,8 +41,10 @@ SquareModels.@variables model begin
 	x[years]
 	y[years]
 end
-const build = SquareModels.@deferred_block model begin
-	x[t = years], x[t] == y[t]
+function build()
+	@block model begin
+		x[t = years], x[t] == y[t]
+	end
 end
 end
 
@@ -89,7 +91,7 @@ end
 	NoJuMPImportBlockTest.run(Model())
 end
 
-@testset "@deferred_block compiles on first call" begin
+@testset "@block compiles on first call" begin
 	@test !haskey(DeferredBlockTest.model, :x_J)
 	first_block = DeferredBlockTest.build()
 	@test length(first_block) == 3

@@ -7,7 +7,7 @@ A JuMP extension for writing modular models with square systems of equations
 """
 module SquareModels
 
-export @block, @deferred_block, @test_constraint, Block, TestConstraint, Equation, @endo_exo_swap!, @variables, add_equation!
+export @block, @test_constraint, Block, TestConstraint, Equation, @endo_exo_swap!, @variables, add_equation!
 export endogenous, residuals, residual, variables, exogenous, is_endogenous, overlaps, shared_endogenous
 export VariableRef  # Re-exported from JuMP for macro hygiene
 export ModelDictionary, fix, unfix, set_start_value, value, value_dict, add_missing_model_variables!
@@ -41,6 +41,7 @@ using JuMP: AffExpr, QuadExpr, NonlinearExpr
 using JuMP.Containers: DenseAxisArray, SparseAxisArray
 using JuMP: @variable
 using JuMP: set_name, name, fix, is_fixed, unfix, all_variables, value, set_start_value
+using JuMP: object_dictionary, set_string_names_on_creation
 import MathOptInterface as MOI
 const _name_lookup_cache = WeakKeyDict{AbstractModel, Dict{String, VariableRef}}()
 
@@ -405,7 +406,20 @@ res = residuals(model)
 
 See also: [`residuals(::Block)`](@ref), [`RESIDUAL_SUFFIX`](@ref)
 """
-residuals(model::AbstractModel) = filter(v -> endswith(base_name(v), RESIDUAL_SUFFIX), all_variables(model))
+function residuals(model::AbstractModel)
+	VariableRef[
+		var
+		for (name, object) in object_dictionary(model)
+		if endswith(string(name), RESIDUAL_SUFFIX)
+		for var in _variable_refs(object)
+	]
+end
+
+_variable_refs(var::AbstractVariableRef) = (var,)
+_variable_refs(object::SparseZeroArray) = _variable_refs(object.data)
+_variable_refs(object::SparseAxisArray) = values(object.data)
+_variable_refs(object::AbstractArray) = object
+_variable_refs(_) = ()
 
 """
     Base.summary(io::IO, b::Block)
@@ -676,24 +690,66 @@ function _equation_with_residual(endo::VariableRef, resid::VariableRef, lhs, rhs
 	return Equation(found ? lhs - new_rhs : lhs - rhs - resid, MOI.EqualTo(0.0))
 end
 
+"""Return the model-dictionary name of an attached object, or `nothing`."""
+function _object_name(model, object)
+	for (name, value) in object_dictionary(model)
+		value === object && return name
+	end
+	if object isa SparseAxisArray
+		for (name, value) in object_dictionary(model)
+			value isa SparseZeroArray && value.data === object && return name
+		end
+	end
+	return nothing
+end
+
+_key_of(object::SparseZeroArray, var) = _key_of(object.data, var)
+function _key_of(object::SparseAxisArray, var)
+	for (key, item) in object.data
+		item === var && return key
+	end
+	return nothing
+end
+function _key_of(object::AbstractArray, var)
+	for key in _all_keys(object)
+		object[key...] === var && return key
+	end
+	return nothing
+end
+_key_of(_, _) = nothing
+
+"""Return `(name, container, key)` for a variable attached to `model`."""
+function _variable_location(model, var::VariableRef)
+	for (name, object) in object_dictionary(model)
+		endswith(string(name), RESIDUAL_SUFFIX) && continue
+		object === var && return name, object, nothing
+		key = _key_of(object, var)
+		key === nothing || return name, object, key
+	end
+	error("Cannot find residual for an unattached variable")
+end
+
 """Create the residual container for `endo` when needed and return its matching item."""
 function _residual_for(endo::VariableRef)
 	m = endo.model
-	base, indices = split_name(endo)
-	residual_base = make_residual_name(base)
-	haskey(m, Symbol(residual_base)) || copy_variable(residual_base, m[Symbol(base)])
-	resid = variable_by_name(m, residual_base * indices)
-	resid === nothing && error("Cannot find residual for $(name(endo))")
-	return resid
+	name, container, key = _variable_location(m, endo)
+	residual_name = Symbol(make_residual_name(name))
+	residuals = haskey(m, residual_name) ?
+		m[residual_name] : copy_variable(string(residual_name), container)
+	key === nothing && return residuals
+	return _index_var(residuals, key)
 end
 
 """Create and return the residual container for an indexed source variable."""
 function _residual_container(variable)
-	first_var = first(variable)
-	m = first_var.model
-	residual_base = make_residual_name(base_name(first_var))
-	return haskey(m, Symbol(residual_base)) ?
-		m[Symbol(residual_base)] : copy_variable(residual_base, variable)
+	m = first(variable).model
+	name = _object_name(m, variable)
+	if name === nothing
+		name, _, _ = _variable_location(m, first(variable))
+	end
+	residual_name = Symbol(make_residual_name(name))
+	return haskey(m, residual_name) ?
+		m[residual_name] : copy_variable(string(residual_name), variable)
 end
 
 """Pair one indexed expression container with its endogenous and residual variables."""
@@ -1225,14 +1281,16 @@ _DeferredBlock(caller::Module, expression::Expr, arguments = ()) =
 
 function (builder::_DeferredBlock)(arguments...)
 	compiled = builder.compiled
-	compiled === nothing || return Base.invokelatest(compiled, arguments...)
-	lock(builder.lock) do
-		if builder.compiled === nothing
-			lambda = Expr(:->, Expr(:tuple, builder.arguments...), builder.expression)
-			builder.compiled = Core.eval(builder.caller, lambda)
+	if compiled === nothing
+		compiled = lock(builder.lock) do
+			if builder.compiled === nothing
+				lambda = Expr(:->, Expr(:tuple, builder.arguments...), builder.expression)
+				builder.compiled = Core.eval(builder.caller, lambda)
+			end
+			builder.compiled
 		end
-		return Base.invokelatest(builder.compiled, arguments...)
 	end
+	return Base.invokelatest(compiled, arguments...)
 end
 
 const _DEFERRED_BLOCK_CACHE = IdDict{Module,Dict{Tuple{String,Int,UInt},_DeferredBlock}}()
@@ -1248,40 +1306,6 @@ function _run_deferred_block(caller, key, expression, argument_names, arguments)
 		end
 	end
 	return builder(arguments...)
-end
-
-"""
-    @deferred_block model begin ... end
-
-Return a zero-argument function that builds a block on its first call. This
-keeps `@block` expansion and compile work out of module load. The model and all
-names used in the block must be globals in the calling module.
-
-Normal `@block` calls also defer this work. Use `@deferred_block` only when the
-program needs to store the zero-argument builder itself.
-
-```julia
-const define_equations = @deferred_block model begin
-    x[i = I], x[i] == y[i]
-end
-```
-"""
-macro deferred_block(model, expr)
-	isexpr(expr, :block) || error("@deferred_block requires a begin...end block")
-	block_call = Expr(
-		:macrocall,
-		GlobalRef(@__MODULE__, Symbol("@_eager_block")),
-		__source__,
-		model,
-		expr,
-	)
-	builder_ref = GlobalRef(@__MODULE__, :_DeferredBlock)
-	caller = QuoteNode(__module__)
-	return quote
-		let builder = $builder_ref($caller, $(QuoteNode(block_call)))
-			() -> builder()
-		end
-	end
 end
 
 function _block_error(line_number, item, message)
@@ -1424,30 +1448,6 @@ function _parse_block_expression(expression)
 	return block_items, test_constraint_items
 end
 
-macro block(model, expr)
-	_parse_block_expression(deepcopy(expr))
-	captures = _block_capture_symbols(model, expr)
-	eager_call = Expr(
-		:macrocall,
-		GlobalRef(@__MODULE__, Symbol("@_eager_block")),
-		__source__,
-		model,
-		expr,
-	)
-	file = __source__.file === nothing ? "none" : String(__source__.file)
-	key = (file, __source__.line, UInt(hash((model, expr, captures))))
-	values = Expr(:tuple, (esc(capture) for capture in captures)...)
-	runner = GlobalRef(@__MODULE__, :_run_deferred_block)
-	caller = QuoteNode(__module__)
-	return :($runner(
-		$caller,
-		$(QuoteNode(key)),
-		$(QuoteNode(eager_call)),
-		$(QuoteNode(captures)),
-		$values,
-	))
-end
-
 """
     @block model begin ... end
 
@@ -1528,6 +1528,30 @@ end
 
 See also: [`Block`](@ref), [`@endo_exo_swap!`](@ref), [`endogenous`](@ref), [`variables`](@ref)
 """
+macro block(model, expr)
+	_parse_block_expression(deepcopy(expr))
+	captures = _block_capture_symbols(model, expr)
+	eager_call = Expr(
+		:macrocall,
+		GlobalRef(@__MODULE__, Symbol("@_eager_block")),
+		__source__,
+		model,
+		expr,
+	)
+	file = __source__.file === nothing ? "none" : String(__source__.file)
+	key = (file, __source__.line, UInt(hash((model, expr, captures))))
+	values = Expr(:tuple, (esc(capture) for capture in captures)...)
+	runner = GlobalRef(@__MODULE__, :_run_deferred_block)
+	caller = QuoteNode(__module__)
+	return :($runner(
+		$caller,
+		$(QuoteNode(key)),
+		$(QuoteNode(eager_call)),
+		$(QuoteNode(captures)),
+		$values,
+	))
+end
+
 macro _eager_block(model, expr)
 	sm = @__MODULE__
 	block_macro_ref = GlobalRef(sm, Symbol("@_block"))
@@ -1612,12 +1636,31 @@ base_name(var::AbstractArray{T}) where {T<:AbstractVariableRef} = base_name(firs
 Return the residual variable or residual container corresponding to an endogenous
 variable or variable container.
 """
-residual(var) = first(var).model[Symbol(make_residual_name(base_name(var)))]
-residual(var::AbstractVariableRef) = var.model[Symbol(make_residual_name(base_name(var)))]
+function residual(var)
+	m = first(var).model
+	name = _object_name(m, var)
+	if name === nothing
+		name, _, _ = _variable_location(m, first(var))
+	end
+	return m[Symbol(make_residual_name(name))]
+end
+function residual(var::AbstractVariableRef)
+	m = var.model
+	name, _, _ = _variable_location(m, var)
+	return m[Symbol(make_residual_name(name))]
+end
 
 """
 If a variable Symbol(new_name) does not exist, define a new variable with the same indices as an existing variable.
 """
+function _copy_index_name!(dest, source, new_name, model)
+	set_string_names_on_creation(model) || return
+	source_name = name(source)
+	isempty(source_name) && return
+	set_name(dest, new_name * split_name(source)[2])
+	return
+end
+
 function copy_variable(new_name::String, original::SparseAxisArray)
 	m = first(original).model
 	sym = Symbol(new_name)
@@ -1625,7 +1668,7 @@ function copy_variable(new_name::String, original::SparseAxisArray)
 	    d = Dict(k => VariableRef(m) for k in keys(original.data))
 	    new = SparseAxisArray(d)
 	    for k in keys(original.data)
-	        set_name(new[k...], new_name * split_name(original[k...])[2])
+	        _copy_index_name!(new[k...], original[k...], new_name, m)
 	    end
 	    m[sym] = new
 	    fix.(new, 0)
@@ -1639,7 +1682,7 @@ function copy_variable(new_name::String, original::AbstractArray)
 	    data = reshape([VariableRef(m) for _ in _all_keys(original)], length.(axes(original))...)
 	    new = DenseAxisArray(data, axes(original)...)
 	    for (x, y) in zip(new, original)
-	        set_name(x, new_name * split_name(y)[2])
+	        _copy_index_name!(x, y, new_name, m)
 	    end
 	    m[sym] = new
 	    fix.(new, 0)
@@ -1651,7 +1694,7 @@ function copy_variable(new_name::String, original::AbstractVariableRef)
 	sym = Symbol(new_name)
 	if !haskey(m, sym)
 	    new = VariableRef(m)
-	    set_name(new, new_name)
+	    set_string_names_on_creation(m) && set_name(new, new_name)
 	    m[sym] = new
 	    fix(new, 0)
 	end

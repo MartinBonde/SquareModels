@@ -71,6 +71,35 @@ end
         @test all(isempty(JuMP.name(variable)) for variable in copied)
     end
 
+    @testset "@block residuals use model-dictionary names when string names are off" begin
+        model = Model()
+        JuMP.set_string_names_on_creation(model, false)
+        stored = Set([(1, :a), (2, :b)])
+        @variables model begin
+            sparse[i = 1:2, j = [:a, :b]; (i, j) in stored]
+            other[i = 1:2, j = [:a, :b]; (i, j) in stored]
+            y[1:2]
+            z
+        end
+        block = @block model begin
+            sparse[(i, j) in stored], sparse[i, j] == i
+            other[(i, j) in stored], other[i, j] == i
+            y[i = 1:2], y[i] == i
+            z, z == 1
+        end
+        @test length(block) == 7
+        @test haskey(model, :sparse_J)
+        @test haskey(model, :other_J)
+        @test haskey(model, :y_J)
+        @test haskey(model, :z_J)
+        @test residual(sparse) === model[:sparse_J]
+        @test residual(other) === model[:other_J]
+        @test residual(z) === model[:z_J]
+        @test all(isempty(JuMP.name(variable)) for variable in sparse)
+        @test all(isempty(JuMP.name(variable)) for variable in model[:sparse_J])
+        @test Set(residuals(model)) == Set(residuals(block))
+    end
+
     @testset "Variables with tags (:: syntax)" begin
         model = Model()
         t = 2020:2022
